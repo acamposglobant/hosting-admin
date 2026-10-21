@@ -91,3 +91,9 @@ secrets.json
 
 # ===== Coda local state =====
 .coda/fgr/
+
+# SQLite database files (runtime data, never committed)
+data/
+*.db
+*.db-wal
+*.db-shm
