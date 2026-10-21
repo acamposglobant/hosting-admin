@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HostingAdmin.Api/HostingAdmin.Api.csproj" />
+    <Project Path="src/HostingAdmin.Core/HostingAdmin.Core.csproj" />
+    <Project Path="src/HostingAdmin.Infrastructure/HostingAdmin.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HostingAdmin.Api.Tests/HostingAdmin.Api.Tests.csproj" />
+    <Project Path="tests/HostingAdmin.Core.Tests/HostingAdmin.Core.Tests.csproj" />
+    <Project Path="tests/HostingAdmin.Infrastructure.Tests/HostingAdmin.Infrastructure.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,93 @@
+# ===== .NET / Visual Studio =====
+bin/
+obj/
+*.user
+*.suo
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+*.sln.docstates
+project.lock.json
+*.pubxml
+*.pubxml.user
+artifacts/
+TestResults/
+[Ll]og/
+[Ll]ogs/
+*.userprefs
+*.pidb
+*.booproj
+*.swo
+*.swp
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+*.nuget.props
+*.nuget.targets
+.nuget/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+bld/
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# Publish output
+publish/
+*.publish.xml
+*.pubxml
+
+# ===== Node.js =====
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.yarn-integrity
+.eslintcache
+*.tsbuildinfo
+dist/
+.vite/
+
+# Frontend build output (when frontend/ is scaffolded in a later task)
+frontend/dist/
+frontend/node_modules/
+
+# ===== SQLite =====
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db-journal
+
+# ===== OS files =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ===== Secrets / environment =====
+*.env
+.env.*
+!.env.example
+appsettings.*.Local.json
+secrets.json
+*.pfx
+*.pfx.password
+*.key
+
+# ===== Coda local state =====
+.coda/fgr/
