@@ -1,0 +1,53 @@
+
+# Hosting Admin Architecture
+
+## Purpose
+
+A private administration panel for one Ubuntu Server VPS.
+The initial increment provides read-only observability.
+
+## Components
+
+- React + TypeScript frontend.
+- ASP.NET Core Web API on .NET 10 LTS.
+- SQLite for application state and audit records.
+- Linux metrics providers.
+- A service-status provider for explicitly configured systemd units.
+- A .NET Worker for future asynchronous operations.
+- A restricted local agent for future privileged operations.
+
+## Architectural constraints
+
+- Start with a modular monolith.
+- Keep the API unprivileged.
+- Do not expose the local agent over a public network.
+- Never implement arbitrary shell execution.
+- Keep hosting workloads separate from panel responsibilities.
+- Do not assume Nginx, PHP, database, DNS, mail or Docker is installed.
+- Use capability checks and report missing services clearly.
+
+## Initial modules
+
+1. Authentication and authorization.
+2. Dashboard and metrics.
+3. Service inventory and status.
+4. Audit and diagnostics.
+
+## Future modules
+
+- Websites and virtual hosts.
+- PHP runtime management.
+- Database administration.
+- DNS and TLS.
+- Docker applications.
+- Mail administration.
+- Backups and restoration.
+
+## Operational requirements
+
+- Structured logs.
+- Health endpoints.
+- Timeouts and cancellation.
+- Explicit configuration.
+- Tested backups and recovery.
+- Documented installation and rollback procedures.
