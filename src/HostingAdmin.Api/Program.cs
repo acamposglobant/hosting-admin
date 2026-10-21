@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HostingAdmin.Api.Middleware;
 using HostingAdmin.Core.Audit;
+using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -34,6 +35,7 @@ builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
+builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
 builder.Services.AddHostedService<AuditRetentionPruneService>();
 
 var app = builder.Build();

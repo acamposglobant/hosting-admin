@@ -1,4 +1,5 @@
 using HostingAdmin.Core.Audit;
+using HostingAdmin.Core.Sessions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -6,11 +7,12 @@ namespace HostingAdmin.Infrastructure.Persistence;
 
 /// <summary>
 /// Periodic maintenance job: prunes audit events older than the configured
-/// retention window (D9: default 90 days). Session cleanup joins this same
-/// maintenance path in task 5.
+/// retention window (D9: default 90 days) and expired/revoked sessions
+/// (plan §3.5 cleanup, T10). Session cleanup joins this same maintenance path.
 /// </summary>
 public sealed class AuditRetentionPruneService(
     IAuditStore auditStore,
+    ISessionStore sessionStore,
     AuditOptions auditOptions,
     ILogger<AuditRetentionPruneService> logger) : BackgroundService
 {
@@ -21,7 +23,7 @@ public sealed class AuditRetentionPruneService(
         using var timer = new PeriodicTimer(interval);
 
         logger.LogInformation(
-            "Audit retention prune scheduled every {Hours}h (retention {Days} days)",
+            "Maintenance prune scheduled every {Hours}h (audit retention {Days} days)",
             interval.TotalHours, auditOptions.RetentionDays);
 
         while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken))
@@ -30,6 +32,12 @@ public sealed class AuditRetentionPruneService(
             {
                 var cutoff = DateTime.UtcNow.AddDays(-auditOptions.RetentionDays);
                 await auditStore.PruneOlderThanAsync(cutoff, stoppingToken);
+
+                var prunedSessions = await sessionStore.PruneExpiredAsync(DateTime.UtcNow, stoppingToken);
+                if (prunedSessions > 0)
+                {
+                    logger.LogInformation("Session cleanup removed {Count} expired/revoked sessions", prunedSessions);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -38,7 +46,7 @@ public sealed class AuditRetentionPruneService(
             catch (Exception ex)
             {
                 // Prune failure must not crash the host; it is retried next interval.
-                logger.LogError(ex, "Audit retention prune failed; will retry next interval");
+                logger.LogError(ex, "Maintenance prune failed; will retry next interval");
             }
         }
     }
