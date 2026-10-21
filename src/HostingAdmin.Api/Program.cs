@@ -1,5 +1,7 @@
 using System.Text.Json;
 using HostingAdmin.Api.Middleware;
+using HostingAdmin.Core.Audit;
+using HostingAdmin.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,6 +13,28 @@ builder.Logging.AddJsonConsole(options =>
     options.UseUtcTimestamp = true;
     options.JsonWriterOptions = new JsonWriterOptions { Indented = false };
 });
+
+// Options with startup validation (engineering standards).
+builder.Services
+    .AddOptions<DatabaseOptions>()
+    .Bind(builder.Configuration.GetSection(DatabaseOptions.SectionName))
+    .Validate(o => !string.IsNullOrWhiteSpace(o.Path), "Database:Path must be configured.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<AuditOptions>()
+    .Bind(builder.Configuration.GetSection(AuditOptions.SectionName))
+    .Validate(o => o.RetentionDays > 0, "Audit:RetentionDays must be positive.")
+    .Validate(o => o.PruneIntervalHours > 0, "Audit:PruneIntervalHours must be positive.")
+    .ValidateOnStart();
+
+builder.Services.AddSingleton<DatabaseOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DatabaseOptions>>().Value);
+builder.Services.AddSingleton<AuditOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
+builder.Services.AddSingleton<SqliteConnectionFactory>();
+builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
+builder.Services.AddHostedService<AuditRetentionPruneService>();
 
 var app = builder.Build();
 
