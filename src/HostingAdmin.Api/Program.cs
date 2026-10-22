@@ -3,6 +3,7 @@ using HostingAdmin.Api.Middleware;
 using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
 using HostingAdmin.Core.Auth;
+using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
@@ -50,12 +51,23 @@ builder.Services
     .Validate(o => o.LockoutWindow > TimeSpan.Zero, "Auth:LockoutWindow must be positive.")
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<SecurityOptions>()
+    .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName))
+    .Validate(o => o.AllowedOrigins.Length > 0 && o.AllowedOrigins.All(origin => !string.IsNullOrWhiteSpace(origin)),
+        "Security:AllowedOrigins must list at least one explicit origin (fails closed otherwise).")
+    .Validate(o => !string.IsNullOrWhiteSpace(o.CsrfCookieName), "Security:CsrfCookieName must be configured.")
+    .Validate(o => !string.IsNullOrWhiteSpace(o.CsrfHeaderName), "Security:CsrfHeaderName must be configured.")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
 builder.Services.AddSingleton<SessionOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SessionOptions>>().Value);
 builder.Services.AddSingleton<AuthOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value);
+builder.Services.AddSingleton<SecurityOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SecurityOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
@@ -68,6 +80,7 @@ var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<NotFoundEnvelopeMiddleware>();
+app.UseMiddleware<CsrfOriginMiddleware>();
 
 // Minimal liveness endpoint — no authentication, no internal application details.
 // Per plan §4: status only. The version is a static assembly version, not runtime detail.
@@ -100,6 +113,7 @@ app.MapPost("/api/auth/login", async (
     HttpContext context,
     LoginService loginService,
     SessionOptions sessionOptions,
+    SecurityOptions securityOptions,
     ISessionStore sessionStore,
     IAuditStore auditStore) =>
 {
@@ -149,9 +163,13 @@ app.MapPost("/api/auth/login", async (
 
     // Success: issue a fresh session (rotation on login — a new opaque id every
     // time), cookie carries the raw id; the store keeps only its hash (T11).
+    // The CSRF cookie (double-submit token, D4) is issued alongside; the SPA
+    // echoes it in the configured header on every cookie-authenticated request.
     var (rawId, record) = new SessionService(sessionOptions).Create("admin", nowUtc);
     await sessionStore.InsertAsync(record, context.RequestAborted);
     SessionCookieWriter.Issue(context, sessionOptions.CookieName, rawId, sessionOptions.AbsoluteLifetime);
+    CsrfCookieWriter.Issue(context, securityOptions.CsrfCookieName, CsrfCookieWriter.GenerateToken(),
+        sessionOptions.AbsoluteLifetime);
 
     await auditStore.AppendAsync(new AuditEvent
     {
@@ -169,6 +187,7 @@ app.MapPost("/api/auth/login", async (
 app.MapPost("/api/auth/logout", async (
     HttpContext context,
     SessionOptions sessionOptions,
+    SecurityOptions securityOptions,
     ISessionStore sessionStore,
     IAuditStore auditStore) =>
 {
@@ -186,6 +205,7 @@ app.MapPost("/api/auth/logout", async (
 
     await sessionStore.RevokeAsync(idHash, context.RequestAborted);
     SessionCookieWriter.Clear(context, sessionOptions.CookieName);
+    CsrfCookieWriter.Clear(context, securityOptions.CsrfCookieName);
 
     await auditStore.AppendAsync(new AuditEvent
     {
@@ -210,11 +230,13 @@ if (builder.Configuration.GetValue<bool>("Diagnostics:TestSessionsEnabled") &&
 {
     // Issues a fresh session: opaque id in the cookie only (never in the body),
     // hash-at-rest in the store (T11). A fresh id per call models rotation on login.
-    app.MapPost("/api/test/sessions", async (HttpContext context, SessionOptions options, ISessionStore store) =>
+    app.MapPost("/api/test/sessions", async (HttpContext context, SessionOptions options, SecurityOptions security, ISessionStore store) =>
     {
         var (rawId, record) = new SessionService(options).Create("admin", DateTime.UtcNow);
         await store.InsertAsync(record, context.RequestAborted);
         SessionCookieWriter.Issue(context, options.CookieName, rawId, options.AbsoluteLifetime);
+        CsrfCookieWriter.Issue(context, security.CsrfCookieName, CsrfCookieWriter.GenerateToken(),
+            options.AbsoluteLifetime);
         return Results.Ok(new { status = "created" });
     });
 
