@@ -219,7 +219,9 @@ public sealed class ServicesEndpointTests
             await client.SendAsync(Get("/api/services"));
             await client.SendAsync(Get("/api/services"));
 
-            Assert.Equal(0, await CountAuditRowsAsync(factory));
+            // Selective audit-on-access (task 13): first data access per session
+            // writes exactly one row; repeated polls add nothing (T15).
+            Assert.Equal(1, await CountAuditRowsAsync(factory));
         }
         finally
         {

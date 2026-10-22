@@ -13,6 +13,12 @@ public interface IAuditStore
     Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Returns a page of audit events, newest first (plan §4: bounded pagination,
+    /// <paramref name="take"/> capped by the caller at 200). Parameterized; read-only.
+    /// </summary>
+    Task<AuditPage> QueryAsync(int skip, int take, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Deletes audit events older than the retention window and returns the
     /// number of rows removed. The only deletion path for audit data.
     /// </summary>

@@ -172,6 +172,11 @@ else
     builder.Services.AddSingleton<IServiceStatusProvider, NullServiceStatusProvider>();
 }
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
+// Selective audit-on-access (plan task 13, §3.7): first data access per session
+// is audited; routine polling is not (D8). Failure grouping records state
+// transitions into failure and recovery, not every repeated occurrence (T16).
+builder.Services.AddSingleton<SelectiveAuditService>();
+builder.Services.AddSingleton<FailureAuditGrouper>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
 builder.Services.AddSingleton<IAdminCredentialStore, SqliteAdminCredentialStore>();
 builder.Services.AddSingleton<ILoginThrottleStore, SqliteLoginThrottleStore>();
@@ -333,6 +338,7 @@ app.MapGet("/api/metrics", async (
     HttpContext context,
     SessionOptions sessionOptions,
     ISessionStore sessionStore,
+    SelectiveAuditService selectiveAuditService,
     MetricsService metricsService) =>
 {
     if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
@@ -347,6 +353,10 @@ app.MapGet("/api/metrics", async (
         return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
     }
 
+    // First data access per session is audited; routine polling is not (D8).
+    await selectiveAuditService.AuditDataAccessIfNeededAsync(
+        idHash, "/api/metrics", context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
     var snapshot = await metricsService.GetSnapshotAsync(context.RequestAborted);
     return Results.Json(snapshot);
 });
@@ -357,6 +367,7 @@ app.MapGet("/api/system/info", async (
     HttpContext context,
     SessionOptions sessionOptions,
     ISessionStore sessionStore,
+    SelectiveAuditService selectiveAuditService,
     ISystemInfoProvider systemInfoProvider) =>
 {
     if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
@@ -371,6 +382,10 @@ app.MapGet("/api/system/info", async (
         return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
     }
 
+    // First data access per session is audited; routine polling is not (D8).
+    await selectiveAuditService.AuditDataAccessIfNeededAsync(
+        idHash, "/api/system/info", context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
     var info = await systemInfoProvider.GetInfoAsync(context.RequestAborted);
     return Results.Json(info);
 });
@@ -381,6 +396,7 @@ app.MapGet("/api/disks", async (
     HttpContext context,
     SessionOptions sessionOptions,
     ISessionStore sessionStore,
+    SelectiveAuditService selectiveAuditService,
     IDiskProvider diskProvider) =>
 {
     if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
@@ -395,6 +411,10 @@ app.MapGet("/api/disks", async (
         return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
     }
 
+    // First data access per session is audited; routine polling is not (D8).
+    await selectiveAuditService.AuditDataAccessIfNeededAsync(
+        idHash, "/api/disks", context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
     var disks = await diskProvider.GetDisksAsync(context.RequestAborted);
     return Results.Json(disks);
 });
@@ -407,6 +427,7 @@ app.MapGet("/api/services", async (
     HttpContext context,
     SessionOptions sessionOptions,
     ISessionStore sessionStore,
+    SelectiveAuditService selectiveAuditService,
     IServiceStatusProvider serviceStatusProvider) =>
 {
     if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
@@ -421,8 +442,80 @@ app.MapGet("/api/services", async (
         return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
     }
 
+    // First data access per session is audited; routine polling is not (D8).
+    await selectiveAuditService.AuditDataAccessIfNeededAsync(
+        idHash, "/api/services", context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
     var snapshot = await serviceStatusProvider.GetStatusAsync(context.RequestAborted);
     return Results.Json(snapshot);
+});
+
+// Audit query endpoint (plan §4, task 13): paged, newest first; take capped at
+// 200 (plan §3.7). Session + CSRF. Audit-log views are themselves audited (D8:
+// "audit-log views" are relevant access events) — every view, not just the
+// first, since inspecting the audit trail is a security-relevant action.
+app.MapGet("/api/audit", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    IAuditStore auditStore) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    // Bounded pagination (plan §4): skip >= 0, 1 <= take <= 200.
+    var skipParsed = int.TryParse(context.Request.Query["skip"], out var parsedSkip) ? parsedSkip : 0;
+    var takeParsed = int.TryParse(context.Request.Query["take"], out var parsedTake) ? parsedTake : 50;
+    var validationErrors = new List<(string Field, string Message)>();
+    if (skipParsed < 0)
+    {
+        validationErrors.Add(("skip", "Must be zero or greater."));
+    }
+    if (takeParsed < 1 || takeParsed > 200)
+    {
+        validationErrors.Add(("take", "Must be between 1 and 200."));
+    }
+
+    if (validationErrors.Count > 0)
+    {
+        return Results.Json(
+            new
+            {
+                error = new
+                {
+                    code = "validation_failed",
+                    message = "One or more parameters are invalid.",
+                    details = validationErrors.Select(e => new { field = e.Field, message = e.Message }).ToArray(),
+                },
+            },
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    // Audit-log views are always audited (plan §3.7).
+    await auditStore.AppendAsync(new AuditEvent
+    {
+        TimestampUtc = DateTime.UtcNow,
+        Actor = "admin",
+        Action = "audit.query",
+        Outcome = AuditOutcomes.Success,
+        Detail = $"skip={skipParsed};take={takeParsed}",
+    }, context.RequestAborted);
+
+    var page = await auditStore.QueryAsync(skipParsed, takeParsed, context.RequestAborted);
+    return Results.Json(new
+    {
+        items = page.Items,
+        totalCount = page.TotalCount,
+    });
 });
 
 // First-admin bootstrap (plan §3.4, D6, task 8): disabled by default — nothing
