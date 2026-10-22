@@ -9,6 +9,7 @@ using HostingAdmin.Core.Metrics;
 using HostingAdmin.Core.Proxy;
 using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Sessions;
+using HostingAdmin.Core.SystemInfo;
 using HostingAdmin.Infrastructure.Persistence;
 using HostingAdmin.Infrastructure.Linux;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
@@ -124,6 +125,24 @@ else
     builder.Services.AddSingleton<IMetricsProvider, NullMetricsProvider>();
 }
 builder.Services.AddSingleton<MetricsService>();
+// Runtime detection (D11): os-release/procfs + statvfs on Linux, structured
+// "unavailable" elsewhere (task 11).
+if (OperatingSystem.IsLinux() && File.Exists("/etc/os-release"))
+{
+    builder.Services.AddSingleton<ISystemInfoProvider, LinuxSystemInfoProvider>();
+}
+else
+{
+    builder.Services.AddSingleton<ISystemInfoProvider, NullSystemInfoProvider>();
+}
+if (OperatingSystem.IsLinux() && File.Exists("/proc/mounts"))
+{
+    builder.Services.AddSingleton<IDiskProvider, LinuxDiskProvider>();
+}
+else
+{
+    builder.Services.AddSingleton<IDiskProvider, NullDiskProvider>();
+}
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
@@ -303,6 +322,54 @@ app.MapGet("/api/metrics", async (
 
     var snapshot = await metricsService.GetSnapshotAsync(context.RequestAborted);
     return Results.Json(snapshot);
+});
+
+// System info endpoint (plan §4, task 11): session + CSRF. Not audited per
+// poll (D8). Structured "unavailable" shape when no source exists (D11).
+app.MapGet("/api/system/info", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ISystemInfoProvider systemInfoProvider) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var info = await systemInfoProvider.GetInfoAsync(context.RequestAborted);
+    return Results.Json(info);
+});
+
+// Disk usage endpoint (plan §4, task 11): real filesystems only; session + CSRF;
+// not audited per poll (D8). Structured "unavailable" shape when no source (D11).
+app.MapGet("/api/disks", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    IDiskProvider diskProvider) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var disks = await diskProvider.GetDisksAsync(context.RequestAborted);
+    return Results.Json(disks);
 });
 
 // First-admin bootstrap (plan §3.4, D6, task 8): disabled by default — nothing
