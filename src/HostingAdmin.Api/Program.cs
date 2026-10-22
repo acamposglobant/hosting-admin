@@ -1,8 +1,10 @@
 using System.Text.Json;
 using HostingAdmin.Api.Middleware;
+using HostingAdmin.Api.Security;
 using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
 using HostingAdmin.Core.Auth;
+using HostingAdmin.Core.Bootstrap;
 using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
@@ -60,6 +62,15 @@ builder.Services
     .Validate(o => !string.IsNullOrWhiteSpace(o.CsrfHeaderName), "Security:CsrfHeaderName must be configured.")
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<BootstrapOptions>()
+    .Bind(builder.Configuration.GetSection(BootstrapOptions.SectionName))
+    .Validate(o => o.WindowDuration > TimeSpan.Zero, "Bootstrap:WindowDuration must be positive.")
+    .Validate(o => o.WindowDuration <= TimeSpan.FromHours(1), "Bootstrap:WindowDuration must be at most one hour.")
+    .Validate(o => o.MinPasswordLength > 0, "Bootstrap:MinPasswordLength must be positive.")
+    .Validate(o => o.MaxPasswordLength >= o.MinPasswordLength, "Bootstrap:MaxPasswordLength must be >= MinPasswordLength.")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
 builder.Services.AddSingleton<SessionOptions>(sp =>
@@ -68,12 +79,16 @@ builder.Services.AddSingleton<AuthOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value);
 builder.Services.AddSingleton<SecurityOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SecurityOptions>>().Value);
+builder.Services.AddSingleton<BootstrapOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<BootstrapOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
 builder.Services.AddSingleton<IAdminCredentialStore, SqliteAdminCredentialStore>();
 builder.Services.AddSingleton<ILoginThrottleStore, SqliteLoginThrottleStore>();
+builder.Services.AddSingleton<IBootstrapStateStore, SqliteBootstrapStateStore>();
 builder.Services.AddSingleton<LoginService>();
+builder.Services.AddSingleton<BootstrapService>();
 builder.Services.AddHostedService<AuditRetentionPruneService>();
 
 var app = builder.Build();
@@ -220,6 +235,162 @@ app.MapPost("/api/auth/logout", async (
     return Results.Ok(new { status = "logged_out" });
 });
 
+// First-admin bootstrap (plan §3.4, D6, task 8): disabled by default — nothing
+// works until a LOCAL operator activates a limited initialization window, and
+// completion is persisted and irreversible through any API request (T7).
+// Local-only authorization validates the actual connection address
+// (RemoteIpAddress); forwarded headers are never consulted (D6). All attempts
+// are audited. Both endpoints are pre-session; the CSRF/Origin middleware still
+// requires an allowed Origin on mutations.
+app.MapPost("/api/bootstrap/activate", async (
+    HttpContext context,
+    BootstrapService bootstrapService,
+    IAuditStore auditStore) =>
+{
+    var nowUtc = DateTime.UtcNow;
+    var sourceIp = context.Connection.RemoteIpAddress?.ToString();
+
+    // D6: local-only authorization on the actual connection address.
+    if (!LocalAccess.IsLoopbackRemote(context))
+    {
+        await auditStore.AppendAsync(new AuditEvent
+        {
+            TimestampUtc = nowUtc,
+            Actor = "anonymous",
+            Action = "bootstrap.activate_denied_nonlocal",
+            Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
+            Detail = null,
+        });
+        return Results.Json(
+            new { error = new { code = "forbidden", message = "Request rejected." } },
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var (outcome, expiresUtc) = await bootstrapService.ActivateAsync(nowUtc, context.RequestAborted);
+
+    if (outcome == ActivateOutcome.AlreadyCompleted)
+    {
+        await auditStore.AppendAsync(new AuditEvent
+        {
+            TimestampUtc = nowUtc,
+            Actor = "anonymous",
+            Action = "bootstrap.activate_denied_completed",
+            Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
+            Detail = null,
+        });
+        return Results.Json(
+            new { error = new { code = "forbidden", message = "Bootstrap is not available." } },
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    await auditStore.AppendAsync(new AuditEvent
+    {
+        TimestampUtc = nowUtc,
+        Actor = "anonymous",
+        Action = "bootstrap.activated",
+        Outcome = AuditOutcomes.Success,
+        SourceIp = sourceIp,
+        Detail = outcome == ActivateOutcome.Opened ? "window_opened" : "window_already_open",
+    });
+
+    return Results.Ok(new { status = "window_open", expiresUtc = expiresUtc });
+});
+
+app.MapPost("/api/bootstrap/admin", async (
+    BootstrapAdminRequest? request,
+    HttpContext context,
+    BootstrapService bootstrapService,
+    IAuditStore auditStore) =>
+{
+    var nowUtc = DateTime.UtcNow;
+    var sourceIp = context.Connection.RemoteIpAddress?.ToString();
+
+    // D6: local-only authorization on the actual connection address.
+    if (!LocalAccess.IsLoopbackRemote(context))
+    {
+        await auditStore.AppendAsync(new AuditEvent
+        {
+            TimestampUtc = nowUtc,
+            Actor = "anonymous",
+            Action = "bootstrap.admin_denied_nonlocal",
+            Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
+            Detail = null,
+        });
+        return Results.Json(
+            new { error = new { code = "forbidden", message = "Request rejected." } },
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    if (request is null || string.IsNullOrEmpty(request.Password))
+    {
+        return Results.Json(
+            new { error = new { code = "validation_failed", message = "A password is required." } },
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var outcome = await bootstrapService.CreateAdminAsync(request.Password, nowUtc, context.RequestAborted);
+
+    switch (outcome)
+    {
+        case CreateAdminOutcome.AlreadyCompleted:
+            await auditStore.AppendAsync(new AuditEvent
+            {
+                TimestampUtc = nowUtc,
+                Actor = "anonymous",
+                Action = "bootstrap.admin_denied_completed",
+                Outcome = AuditOutcomes.Failure,
+                SourceIp = sourceIp,
+                Detail = null,
+            });
+            return Results.Json(
+                new { error = new { code = "forbidden", message = "Bootstrap is not available." } },
+                statusCode: StatusCodes.Status403Forbidden);
+
+        case CreateAdminOutcome.WindowClosed:
+            await auditStore.AppendAsync(new AuditEvent
+            {
+                TimestampUtc = nowUtc,
+                Actor = "anonymous",
+                Action = "bootstrap.admin_denied_window_closed",
+                Outcome = AuditOutcomes.Failure,
+                SourceIp = sourceIp,
+                Detail = null,
+            });
+            return Results.Json(
+                new { error = new { code = "forbidden", message = "Bootstrap is not available." } },
+                statusCode: StatusCodes.Status403Forbidden);
+
+        case CreateAdminOutcome.WeakPassword:
+            await auditStore.AppendAsync(new AuditEvent
+            {
+                TimestampUtc = nowUtc,
+                Actor = "anonymous",
+                Action = "bootstrap.admin_rejected_weak_password",
+                Outcome = AuditOutcomes.Failure,
+                SourceIp = sourceIp,
+                Detail = null,
+            });
+            return Results.Json(
+                new { error = new { code = "validation_failed", message = "The password does not meet the length requirements." } },
+                statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    await auditStore.AppendAsync(new AuditEvent
+    {
+        TimestampUtc = nowUtc,
+        Actor = "admin",
+        Action = "bootstrap.admin_created",
+        Outcome = AuditOutcomes.Success,
+        SourceIp = sourceIp,
+        Detail = null,
+    });
+
+    return Results.Ok(new { status = "admin_created" });
+});
+
 // Test-only session lifecycle endpoints (plan task 5, T8–T11). They exercise the
 // session lifecycle mechanics alongside the real auth endpoints above.
 // Double-gated like the force-error endpoint: configuration flag AND non-production
@@ -277,3 +448,6 @@ public partial class Program { }
 
 /// <summary>Login request body. The password is bound but never logged (D7).</summary>
 public sealed record LoginRequest(string? Password);
+
+/// <summary>First-admin bootstrap request body. The password is bound but never logged (D7).</summary>
+public sealed record BootstrapAdminRequest(string? Password);
