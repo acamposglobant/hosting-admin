@@ -5,10 +5,12 @@ using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
 using HostingAdmin.Core.Auth;
 using HostingAdmin.Core.Bootstrap;
+using HostingAdmin.Core.Metrics;
 using HostingAdmin.Core.Proxy;
 using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
+using HostingAdmin.Infrastructure.Linux;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -104,6 +106,24 @@ builder.Services.AddSingleton<BootstrapOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<BootstrapOptions>>().Value);
 builder.Services.AddSingleton<ProxyOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ProxyOptions>>().Value);
+builder.Services
+    .AddOptions<MetricsOptions>()
+    .Bind(builder.Configuration.GetSection(MetricsOptions.SectionName))
+    .Validate(o => o.CacheTtl > TimeSpan.Zero, "Metrics:CacheTtl must be positive.")
+    .Validate(o => o.CollectionTimeout > TimeSpan.Zero, "Metrics:CollectionTimeout must be positive.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<MetricsOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<MetricsOptions>>().Value);
+// Runtime detection (D11): procfs on Linux, structured "unavailable" elsewhere.
+if (OperatingSystem.IsLinux() && File.Exists("/proc/stat"))
+{
+    builder.Services.AddSingleton<IMetricsProvider, ProcFsMetricsProvider>();
+}
+else
+{
+    builder.Services.AddSingleton<IMetricsProvider, NullMetricsProvider>();
+}
+builder.Services.AddSingleton<MetricsService>();
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
@@ -257,6 +277,32 @@ app.MapPost("/api/auth/logout", async (
     });
 
     return Results.Ok(new { status = "logged_out" });
+});
+
+// Metrics endpoint (plan §4, task 10): session + CSRF (enforced by the CSRF
+// middleware whenever the session cookie is presented). Served from the bounded
+// cache (D10) and NOT audited per poll (D8). On platforms without a metrics
+// source the structured "unavailable" shape is returned (D11).
+app.MapGet("/api/metrics", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    MetricsService metricsService) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var snapshot = await metricsService.GetSnapshotAsync(context.RequestAborted);
+    return Results.Json(snapshot);
 });
 
 // First-admin bootstrap (plan §3.4, D6, task 8): disabled by default — nothing
