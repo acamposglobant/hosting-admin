@@ -110,6 +110,9 @@ public class ErrorEnvelopeIntegrationTests
         {
             builder.UseSetting("Diagnostics:ForceErrorEnabled", forceErrorEnabled ? "true" : "false");
             builder.UseSetting("environment", "Production");
+            // This test exercises error mapping in the Production environment, not
+            // proxy attestation (task 9); disable it so requests reach the endpoint.
+            builder.UseSetting("Proxy:RequireAttestation", "false");
         });
         return factory.CreateClient();
     }

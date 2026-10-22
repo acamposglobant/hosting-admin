@@ -5,12 +5,22 @@ using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
 using HostingAdmin.Core.Auth;
 using HostingAdmin.Core.Bootstrap;
+using HostingAdmin.Core.Proxy;
 using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// D2 (primary control): in production the API binds to loopback — the reverse
+// proxy runs on the same host. Configured via Network:Urls in
+// appsettings.Production.json; Development keeps launchSettings control.
+var networkUrls = builder.Configuration["Network:Urls"];
+if (!string.IsNullOrWhiteSpace(networkUrls))
+{
+    builder.WebHost.UseUrls(networkUrls);
+}
 
 // Structured logging: JSON console formatter so log records are machine-parseable
 // (plan §4). Secret redaction is applied in the exception middleware and must also
@@ -71,6 +81,17 @@ builder.Services
     .Validate(o => o.MaxPasswordLength >= o.MinPasswordLength, "Bootstrap:MaxPasswordLength must be >= MinPasswordLength.")
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<ProxyOptions>()
+    .Bind(builder.Configuration.GetSection(ProxyOptions.SectionName))
+    .Validate(o => !string.IsNullOrWhiteSpace(o.AttestationHeaderName), "Proxy:AttestationHeaderName must be configured.")
+    .Validate(o => !o.RequireAttestation || !string.IsNullOrEmpty(o.AttestationSecret),
+        "Proxy:AttestationSecret must be configured when Proxy:RequireAttestation is enabled.")
+    .Validate(o => o.TrustedProxyAddresses.Length > 0 &&
+               o.TrustedProxyAddresses.All(address => System.Net.IPAddress.TryParse(address, out _)),
+        "Proxy:TrustedProxyAddresses must list valid IP addresses.")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
 builder.Services.AddSingleton<SessionOptions>(sp =>
@@ -81,6 +102,8 @@ builder.Services.AddSingleton<SecurityOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SecurityOptions>>().Value);
 builder.Services.AddSingleton<BootstrapOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<BootstrapOptions>>().Value);
+builder.Services.AddSingleton<ProxyOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ProxyOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
@@ -94,6 +117,7 @@ builder.Services.AddHostedService<AuditRetentionPruneService>();
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseMiddleware<ProxyTrustMiddleware>();
 app.UseMiddleware<NotFoundEnvelopeMiddleware>();
 app.UseMiddleware<CsrfOriginMiddleware>();
 
