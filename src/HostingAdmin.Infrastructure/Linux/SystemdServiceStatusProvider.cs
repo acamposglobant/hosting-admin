@@ -94,14 +94,16 @@ public sealed class SystemdServiceStatusProvider : IServiceStatusProvider
         string? loadState = null, activeState = null, subState = null, enabledState = null, activeEnterTimestamp = null;
         foreach (var line in stdout.Split('\n'))
         {
-            var separatorIndex = line.IndexOf('=');
+            // Tolerate CRLF input (tests, redirected output on Windows).
+            var cleanLine = line.TrimEnd('\r');
+            var separatorIndex = cleanLine.IndexOf('=');
             if (separatorIndex <= 0)
             {
                 continue;
             }
 
-            var key = line[..separatorIndex];
-            var value = line[(separatorIndex + 1)..];
+            var key = cleanLine[..separatorIndex];
+            var value = cleanLine[(separatorIndex + 1)..];
             switch (key)
             {
                 case "LoadState": loadState = value; break;
