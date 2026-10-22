@@ -17,6 +17,7 @@ namespace HostingAdmin.Api.Tests;
 public class SessionLifecycleIntegrationTests
 {
     private const string CookieName = "ha_session";
+    private const string CsrfCookieName = "ha_csrf";
 
     private sealed record TestBody(string? Status, string? Error);
 
@@ -62,6 +63,7 @@ public class SessionLifecycleIntegrationTests
         {
             builder.UseSetting("Diagnostics:TestSessionsEnabled", "true");
             builder.UseSetting("Database:Path", databasePath);
+            builder.UseSetting("Security:AllowedOrigins:0", "https://panel.local");
         });
         return (factory, factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -75,6 +77,30 @@ public class SessionLifecycleIntegrationTests
     {
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<TestBody>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    }
+
+    /// <summary>
+    /// Issues a session + CSRF cookie pair (the create POST requires an allowed
+    /// Origin) and returns the raw Set-Cookie headers for both cookies.
+    /// </summary>
+    private static async Task<(string SessionCookie, string CsrfCookie)> CreateSessionAsync(HttpClient client)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/test/sessions");
+        request.Headers.Add("Origin", "https://panel.local");
+        var create = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, create.StatusCode);
+        var sessionCookie = create.Headers.GetValues("Set-Cookie")
+            .Single(c => c.StartsWith($"{CookieName}=", StringComparison.Ordinal));
+        var csrfCookie = create.Headers.GetValues("Set-Cookie")
+            .Single(c => c.StartsWith($"{CsrfCookieName}=", StringComparison.Ordinal));
+        return (sessionCookie, csrfCookie);
+    }
+
+    private static string ExtractCsrfToken(string setCookieHeader)
+    {
+        var start = setCookieHeader.IndexOf('=') + 1;
+        var end = setCookieHeader.IndexOf(';', start);
+        return end < 0 ? setCookieHeader[start..] : setCookieHeader[start..end];
     }
 
     /// <summary>Reads every text column of every table in the test database.</summary>
@@ -121,10 +147,13 @@ public class SessionLifecycleIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/test/sessions", content: null);
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/test/sessions");
+            request.Headers.Add("Origin", "https://panel.local");
+            var response = await client.SendAsync(request);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var setCookie = Assert.Single(response.Headers.GetValues("Set-Cookie"));
+            var setCookie = response.Headers.GetValues("Set-Cookie")
+                .Single(c => c.StartsWith($"{CookieName}=", StringComparison.Ordinal));
             Assert.StartsWith($"{CookieName}=", setCookie);
             // ASP.NET Core emits lowercase cookie attribute names.
             Assert.Contains("httponly", setCookie, StringComparison.OrdinalIgnoreCase);
@@ -148,10 +177,11 @@ public class SessionLifecycleIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var createResponse = await client.PostAsync("/api/test/sessions", content: null);
-            var setCookie = Assert.Single(createResponse.Headers.GetValues("Set-Cookie"));
+            var createResponse = await CreateSessionAsync(client);
+            var setCookie = createResponse.SessionCookie;
             var rawId = setCookie[$"{CookieName}=".Length..setCookie.IndexOf(';')];
-            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}");
+            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}; {createResponse.CsrfCookie}");
+            client.DefaultRequestHeaders.Add("X-CSRF-Token", ExtractCsrfToken(createResponse.CsrfCookie));
 
             var response = await client.GetAsync("/api/test/sessions/current");
 
@@ -185,7 +215,8 @@ public class SessionLifecycleIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={new string('A', 64)}");
+            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={new string('A', 64)}; {CsrfCookieName}=token");
+            client.DefaultRequestHeaders.Add("X-CSRF-Token", "token");
 
             var response = await client.GetAsync("/api/test/sessions/current");
 
@@ -215,7 +246,8 @@ public class SessionLifecycleIntegrationTests
                 IdleExpiresUtc = null,
                 Revoked = false,
             });
-            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}");
+            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}; {CsrfCookieName}=token");
+            client.DefaultRequestHeaders.Add("X-CSRF-Token", "token");
 
             var response = await client.GetAsync("/api/test/sessions/current");
 
@@ -235,10 +267,12 @@ public class SessionLifecycleIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var createResponse = await client.PostAsync("/api/test/sessions", content: null);
-            var setCookie = Assert.Single(createResponse.Headers.GetValues("Set-Cookie"));
+            var createResponse = await CreateSessionAsync(client);
+            var setCookie = createResponse.SessionCookie;
             var rawId = setCookie[$"{CookieName}=".Length..setCookie.IndexOf(';')];
-            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}");
+            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}; {createResponse.CsrfCookie}");
+            client.DefaultRequestHeaders.Add("X-CSRF-Token", ExtractCsrfToken(createResponse.CsrfCookie));
+            client.DefaultRequestHeaders.Add("Origin", "https://panel.local");
 
             var invalidateResponse = await client.PostAsync("/api/test/sessions/invalidate", content: null);
             Assert.Equal(HttpStatusCode.OK, invalidateResponse.StatusCode);
@@ -320,8 +354,11 @@ public class SessionLifecycleIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/test/sessions", content: null);
-            var setCookie = Assert.Single(response.Headers.GetValues("Set-Cookie"));
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/test/sessions");
+            request.Headers.Add("Origin", "https://panel.local");
+            var response = await client.SendAsync(request);
+            var setCookie = response.Headers.GetValues("Set-Cookie")
+                .Single(c => c.StartsWith($"{CookieName}=", StringComparison.Ordinal));
             var rawId = setCookie[$"{CookieName}=".Length..setCookie.IndexOf(';')];
             var responseBody = await response.Content.ReadAsStringAsync();
 
@@ -347,10 +384,13 @@ public class SessionLifecycleIntegrationTests
             builder.UseSetting("Diagnostics:TestSessionsEnabled", "false");
             builder.UseSetting("Database:Path", System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), "hostingadmin-tests", $"sessions-{Guid.NewGuid():N}.db"));
+            builder.UseSetting("Security:AllowedOrigins:0", "https://panel.local");
         });
         using var client = factory.CreateClient();
 
-        var response = await client.PostAsync("/api/test/sessions", content: null);
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/test/sessions");
+        request.Headers.Add("Origin", "https://panel.local");
+        var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }

@@ -37,6 +37,7 @@ public class AuthIntegrationTests
             // Small limits so the 429 test needs only 3 attempts.
             builder.UseSetting("Auth:MaxFailedLoginAttempts", "3");
             builder.UseSetting("Auth:LockoutWindow", "00:15:00");
+            builder.UseSetting("Security:AllowedOrigins:0", "https://panel.local");
         });
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -73,6 +74,17 @@ public class AuthIntegrationTests
     private static StringContent JsonBody(object payload)
     {
         return new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+    }
+
+    /// <summary>POSTs the login endpoint with the allowed Origin header.</summary>
+    private static Task<HttpResponseMessage> LoginAsync(HttpClient client, string password)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
+        {
+            Content = JsonBody(new { password }),
+        };
+        request.Headers.Add("Origin", "https://panel.local");
+        return client.SendAsync(request);
     }
 
     private static string? ExtractRawId(HttpResponseMessage response)
@@ -118,10 +130,11 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/auth/login", JsonBody(new { password = Password }));
+            var response = await LoginAsync(client, Password);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var setCookie = Assert.Single(response.Headers.GetValues("Set-Cookie"));
+            var setCookie = response.Headers.GetValues("Set-Cookie")
+                .Single(c => c.StartsWith($"{CookieName}=", StringComparison.Ordinal));
             Assert.StartsWith($"{CookieName}=", setCookie);
             Assert.Contains("httponly", setCookie, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("secure", setCookie, StringComparison.OrdinalIgnoreCase);
@@ -143,7 +156,7 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/auth/login", JsonBody(new { password = "wrong" }));
+            var response = await LoginAsync(client, "wrong");
 
             Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
@@ -166,7 +179,7 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/auth/login", JsonBody(new { password = "" }));
+            var response = await LoginAsync(client, "");
 
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
             Assert.Equal(0, await CountAuditRowsAsync(factory, "auth.login"));
@@ -186,12 +199,12 @@ public class AuthIntegrationTests
         {
             for (var attempt = 0; attempt < 3; attempt++)
             {
-                var failed = await client.PostAsync("/api/auth/login", JsonBody(new { password = "wrong" }));
+                var failed = await LoginAsync(client, "wrong");
                 Assert.Equal(HttpStatusCode.Unauthorized, failed.StatusCode);
             }
 
             // The next attempt — even with the correct password — is rate limited.
-            var limited = await client.PostAsync("/api/auth/login", JsonBody(new { password = Password }));
+            var limited = await LoginAsync(client, Password);
 
             Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
             var body = await limited.Content.ReadAsStringAsync();
@@ -218,6 +231,7 @@ public class AuthIntegrationTests
                 {
                     b.UseSetting("Database:Path", databasePath);
                     b.UseSetting("Auth:MaxFailedLoginAttempts", "1");
+                    b.UseSetting("Security:AllowedOrigins:0", "https://panel.local");
                 });
                 using var scope = f.Services.CreateScope();
                 await scope.ServiceProvider.GetRequiredService<IAdminCredentialStore>()
@@ -227,7 +241,7 @@ public class AuthIntegrationTests
 
             var first = await StartHost();
             var firstClient = first.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
-            var failed = await firstClient.PostAsync("/api/auth/login", JsonBody(new { password = "wrong" }));
+            var failed = await LoginAsync(firstClient, "wrong");
             Assert.Equal(HttpStatusCode.Unauthorized, failed.StatusCode);
             firstClient.Dispose();
             first.Dispose();
@@ -236,7 +250,7 @@ public class AuthIntegrationTests
             // A brand-new host (fresh process state) must still see the lockout.
             var second = await StartHost();
             var secondClient = second.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
-            var locked = await secondClient.PostAsync("/api/auth/login", JsonBody(new { password = Password }));
+            var locked = await LoginAsync(secondClient, Password);
             Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
             secondClient.Dispose();
             second.Dispose();
@@ -260,16 +274,22 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var login = await client.PostAsync("/api/auth/login", JsonBody(new { password = Password }));
+            var login = await LoginAsync(client, Password);
             var rawId = ExtractRawId(login);
             Assert.NotNull(rawId);
-            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}");
+            var csrfSetCookie = login.Headers.GetValues("Set-Cookie")
+                .Single(v => v.StartsWith("ha_csrf=", StringComparison.Ordinal));
+            var csrfToken = csrfSetCookie["ha_csrf=".Length..csrfSetCookie.IndexOf(';')];
+            client.DefaultRequestHeaders.Add("Cookie", $"{CookieName}={rawId}; ha_csrf={csrfToken}");
+            client.DefaultRequestHeaders.Add("X-CSRF-Token", csrfToken);
+            client.DefaultRequestHeaders.Add("Origin", "https://panel.local");
 
             var logout = await client.PostAsync("/api/auth/logout", content: null);
             Assert.Equal(HttpStatusCode.OK, logout.StatusCode);
 
-            // The response clears the cookie.
-            var clearCookie = logout.Headers.GetValues("Set-Cookie").Single();
+            // The response clears both cookies.
+            var clearCookie = logout.Headers.GetValues("Set-Cookie")
+                .Single(c => c.StartsWith($"{CookieName}=", StringComparison.Ordinal));
             Assert.Contains("expires=", clearCookie, StringComparison.OrdinalIgnoreCase);
 
             // The revoked session is rejected immediately (T9): a second logout
@@ -292,7 +312,9 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/auth/logout", content: null);
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
+            request.Headers.Add("Origin", "https://panel.local");
+            var response = await client.SendAsync(request);
 
             Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
@@ -311,7 +333,7 @@ public class AuthIntegrationTests
         var (factory, client, databasePath) = CreateHost();
         try
         {
-            var response = await client.PostAsync("/api/auth/login", JsonBody(new { password = Password }));
+            var response = await LoginAsync(client, Password);
             var body = await response.Content.ReadAsStringAsync();
 
             Assert.DoesNotContain(Password, body);
