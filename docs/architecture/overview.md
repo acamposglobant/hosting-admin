@@ -51,3 +51,7 @@ The initial increment provides read-only observability.
 - Explicit configuration.
 - Tested backups and recovery.
 - Documented installation and rollback procedures.
+
+Deployment (IAP + Nginx + systemd, unprivileged user) is documented in
+[docs/deployment.md](../deployment.md). The increment 1 security review pass
+is in [docs/security/security-review-increment-1.md](../security/security-review-increment-1.md).

@@ -50,3 +50,14 @@ mail changes or privileged Docker operations.
 
 Document risks that cannot be fully mitigated in the initial increment.
 Do not claim production readiness without validating the deployment.
+
+The increment 1 security review pass logged the following residual risks
+(full analysis in [security-review-increment-1.md](security-review-increment-1.md)):
+
+- IAP integration validated only at first deployment (checklist in the
+  deployment guide).
+- Single admin with one in-application factor; MFA delegated to the IAP.
+- Audit records live on the same host filesystem (SQLite); off-host audit
+  shipping is a future control.
+- No automated dependency vulnerability scanning yet.
+- No protection is claimed against a root-compromised host.
