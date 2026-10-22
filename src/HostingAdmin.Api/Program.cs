@@ -8,6 +8,7 @@ using HostingAdmin.Core.Bootstrap;
 using HostingAdmin.Core.Metrics;
 using HostingAdmin.Core.Proxy;
 using HostingAdmin.Core.Security;
+using HostingAdmin.Core.Services;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Core.SystemInfo;
 using HostingAdmin.Infrastructure.Persistence;
@@ -144,6 +145,32 @@ else
     builder.Services.AddSingleton<IDiskProvider, NullDiskProvider>();
 }
 builder.Services.AddSingleton<SqliteConnectionFactory>();
+// Service status options (task 12, D12): the unit allowlist is validated at
+// startup — invalid configuration fails startup instead of degrading silently.
+builder.Services
+    .AddOptions<ServiceStatusOptions>()
+    .Bind(builder.Configuration.GetSection(ServiceStatusOptions.SectionName))
+    .Validate(o => o.UnitNames.Count > 0, "Services:UnitNames must contain at least one unit.")
+    .Validate(o => o.UnitNames.All(ServiceStatusOptions.IsValidUnitName), "Services:UnitNames contains an invalid systemd unit name.")
+    .Validate(o => Path.IsPathRooted(o.SystemctlPath), "Services:SystemctlPath must be an absolute path.")
+    .Validate(o => o.Timeout > TimeSpan.Zero, "Services:Timeout must be positive.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<ServiceStatusOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ServiceStatusOptions>>().Value);
+builder.Services.AddSingleton<ISystemCtlLauncher>(sp =>
+{
+    var options = sp.GetRequiredService<ServiceStatusOptions>();
+    return new SystemCtlLauncher(options.SystemctlPath);
+});
+// Runtime detection (D11): systemctl on Linux, structured "unavailable" elsewhere.
+if (OperatingSystem.IsLinux())
+{
+    builder.Services.AddSingleton<IServiceStatusProvider, SystemdServiceStatusProvider>();
+}
+else
+{
+    builder.Services.AddSingleton<IServiceStatusProvider, NullServiceStatusProvider>();
+}
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
 builder.Services.AddSingleton<IAdminCredentialStore, SqliteAdminCredentialStore>();
@@ -370,6 +397,32 @@ app.MapGet("/api/disks", async (
 
     var disks = await diskProvider.GetDisksAsync(context.RequestAborted);
     return Results.Json(disks);
+});
+
+// Service status endpoint (plan §4, task 12, D12): units come only from the
+// server-side allowlist — the endpoint accepts no client parameters at all.
+// Session + CSRF; not audited per poll (D8). Structured "unavailable" shape
+// when systemd is not available (D11).
+app.MapGet("/api/services", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    IServiceStatusProvider serviceStatusProvider) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var snapshot = await serviceStatusProvider.GetStatusAsync(context.RequestAborted);
+    return Results.Json(snapshot);
 });
 
 // First-admin bootstrap (plan §3.4, D6, task 8): disabled by default — nothing
