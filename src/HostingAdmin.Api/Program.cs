@@ -2,6 +2,7 @@ using System.Text.Json;
 using HostingAdmin.Api.Middleware;
 using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
+using HostingAdmin.Core.Auth;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
@@ -42,13 +43,25 @@ builder.Services
     .Validate(o => !string.IsNullOrWhiteSpace(o.CookieName), "Sessions:CookieName must be configured.")
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<AuthOptions>()
+    .Bind(builder.Configuration.GetSection(AuthOptions.SectionName))
+    .Validate(o => o.MaxFailedLoginAttempts > 0, "Auth:MaxFailedLoginAttempts must be positive.")
+    .Validate(o => o.LockoutWindow > TimeSpan.Zero, "Auth:LockoutWindow must be positive.")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
 builder.Services.AddSingleton<SessionOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SessionOptions>>().Value);
+builder.Services.AddSingleton<AuthOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
+builder.Services.AddSingleton<IAdminCredentialStore, SqliteAdminCredentialStore>();
+builder.Services.AddSingleton<ILoginThrottleStore, SqliteLoginThrottleStore>();
+builder.Services.AddSingleton<LoginService>();
 builder.Services.AddHostedService<AuditRetentionPruneService>();
 
 var app = builder.Build();
@@ -77,9 +90,118 @@ if (builder.Configuration.GetValue<bool>("Diagnostics:ForceErrorEnabled") &&
     });
 }
 
+// Real authentication endpoints (plan §3.3, task 6): single admin, PBKDF2
+// credential, DB-backed login rate limiting, audit of auth events (T12–T14).
+// Failure responses are always generic — no distinction between "wrong
+// password" and "no credential configured" (D7). CSRF + Origin validation for
+// cookie-authenticated requests is task 7 (D4); login itself is pre-session.
+app.MapPost("/api/auth/login", async (
+    LoginRequest? request,
+    HttpContext context,
+    LoginService loginService,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    IAuditStore auditStore) =>
+{
+    var sourceIp = context.Connection.RemoteIpAddress?.ToString();
+
+    if (request is null || string.IsNullOrEmpty(request.Password))
+    {
+        return Results.Json(
+            new { error = new { code = "validation_failed", message = "A password is required." } },
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var nowUtc = DateTime.UtcNow;
+    var result = await loginService.AuthenticateAsync(request.Password, nowUtc, context.RequestAborted);
+
+    if (result.IsLockedOut)
+    {
+        await auditStore.AppendAsync(new AuditEvent
+        {
+            TimestampUtc = nowUtc,
+            Actor = "anonymous",
+            Action = "auth.login",
+            Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
+            Detail = "locked_out",
+        });
+        return Results.Json(
+            new { error = new { code = "rate_limited", message = "Too many failed attempts. Try again later." } },
+            statusCode: StatusCodes.Status429TooManyRequests);
+    }
+
+    if (!result.Succeeded)
+    {
+        await auditStore.AppendAsync(new AuditEvent
+        {
+            TimestampUtc = nowUtc,
+            Actor = "anonymous",
+            Action = "auth.login_failed",
+            Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
+            Detail = null,
+        });
+        return Results.Json(
+            new { error = new { code = "unauthorized", message = "Invalid credentials." } },
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    // Success: issue a fresh session (rotation on login — a new opaque id every
+    // time), cookie carries the raw id; the store keeps only its hash (T11).
+    var (rawId, record) = new SessionService(sessionOptions).Create("admin", nowUtc);
+    await sessionStore.InsertAsync(record, context.RequestAborted);
+    SessionCookieWriter.Issue(context, sessionOptions.CookieName, rawId, sessionOptions.AbsoluteLifetime);
+
+    await auditStore.AppendAsync(new AuditEvent
+    {
+        TimestampUtc = nowUtc,
+        Actor = "admin",
+        Action = "auth.login",
+        Outcome = AuditOutcomes.Success,
+        SourceIp = sourceIp,
+        Detail = null,
+    });
+
+    return Results.Ok(new { status = "authenticated" });
+});
+
+app.MapPost("/api/auth/logout", async (
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    IAuditStore auditStore) =>
+{
+    if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var idHash = SessionService.HashId(rawId);
+    var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+    if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    await sessionStore.RevokeAsync(idHash, context.RequestAborted);
+    SessionCookieWriter.Clear(context, sessionOptions.CookieName);
+
+    await auditStore.AppendAsync(new AuditEvent
+    {
+        TimestampUtc = DateTime.UtcNow,
+        Actor = record.AdminId,
+        Action = "auth.logout",
+        Outcome = AuditOutcomes.Success,
+        SourceIp = context.Connection.RemoteIpAddress?.ToString(),
+        Detail = null,
+    });
+
+    return Results.Ok(new { status = "logged_out" });
+});
+
 // Test-only session lifecycle endpoints (plan task 5, T8–T11). They exercise the
-// cookie issuance/invalidation mechanics that the real /api/auth/login and
-// /api/auth/logout endpoints (task 6) will reuse via SessionCookieWriter.
+// session lifecycle mechanics alongside the real auth endpoints above.
 // Double-gated like the force-error endpoint: configuration flag AND non-production
 // environment, DISABLED by default; never reachable in production. They issue no
 // credential check — real authentication is task 6.
@@ -130,3 +252,6 @@ if (builder.Configuration.GetValue<bool>("Diagnostics:TestSessionsEnabled") &&
 app.Run();
 
 public partial class Program { }
+
+/// <summary>Login request body. The password is bound but never logged (D7).</summary>
+public sealed record LoginRequest(string? Password);
