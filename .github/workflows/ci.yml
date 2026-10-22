@@ -56,3 +56,30 @@ jobs:
 
       - name: Test (portable tests only)
         run: dotnet test --no-build --filter "Category!=LinuxIntegration"
+
+  test-frontend:
+    # Frontend (task 14): Vite + React + TS. Type-check + build + component
+    # tests (Vitest + React Testing Library) run on every PR.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (type-check + production bundle)
+        run: npm run build
+
+      - name: Test (Vitest + React Testing Library)
+        run: npm test
