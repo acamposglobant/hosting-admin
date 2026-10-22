@@ -1,8 +1,10 @@
 using System.Text.Json;
 using HostingAdmin.Api.Middleware;
+using HostingAdmin.Api.Sessions;
 using HostingAdmin.Core.Audit;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Infrastructure.Persistence;
+using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -31,8 +33,19 @@ builder.Services
 
 builder.Services.AddSingleton<DatabaseOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DatabaseOptions>>().Value);
+builder.Services
+    .AddOptions<SessionOptions>()
+    .Bind(builder.Configuration.GetSection(SessionOptions.SectionName))
+    .Validate(o => o.AbsoluteLifetime > TimeSpan.Zero, "Sessions:AbsoluteLifetime must be positive.")
+    .Validate(o => o.IdleTimeout is null || o.IdleTimeout > TimeSpan.Zero, "Sessions:IdleTimeout must be positive when set.")
+    .Validate(o => o.IdleTimeout is null || o.IdleTimeout < o.AbsoluteLifetime, "Sessions:IdleTimeout must be shorter than AbsoluteLifetime.")
+    .Validate(o => !string.IsNullOrWhiteSpace(o.CookieName), "Sessions:CookieName must be configured.")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<AuditOptions>(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditOptions>>().Value);
+builder.Services.AddSingleton<SessionOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SessionOptions>>().Value);
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
@@ -61,6 +74,56 @@ if (builder.Configuration.GetValue<bool>("Diagnostics:ForceErrorEnabled") &&
     app.MapGet("/api/diagnostics/force-error", (HttpContext context) =>
     {
         throw new InvalidOperationException("Forced test exception");
+    });
+}
+
+// Test-only session lifecycle endpoints (plan task 5, T8–T11). They exercise the
+// cookie issuance/invalidation mechanics that the real /api/auth/login and
+// /api/auth/logout endpoints (task 6) will reuse via SessionCookieWriter.
+// Double-gated like the force-error endpoint: configuration flag AND non-production
+// environment, DISABLED by default; never reachable in production. They issue no
+// credential check — real authentication is task 6.
+if (builder.Configuration.GetValue<bool>("Diagnostics:TestSessionsEnabled") &&
+    !app.Environment.IsProduction())
+{
+    // Issues a fresh session: opaque id in the cookie only (never in the body),
+    // hash-at-rest in the store (T11). A fresh id per call models rotation on login.
+    app.MapPost("/api/test/sessions", async (HttpContext context, SessionOptions options, ISessionStore store) =>
+    {
+        var (rawId, record) = new SessionService(options).Create("admin", DateTime.UtcNow);
+        await store.InsertAsync(record, context.RequestAborted);
+        SessionCookieWriter.Issue(context, options.CookieName, rawId, options.AbsoluteLifetime);
+        return Results.Ok(new { status = "created" });
+    });
+
+    // Validates the presented cookie against the store: 200 when the session is
+    // valid, 401 when unknown/expired/revoked (T8, T9). No data in the 401 body.
+    app.MapGet("/api/test/sessions/current", async (HttpContext context, SessionOptions options, ISessionStore store) =>
+    {
+        if (!context.Request.Cookies.TryGetValue(options.CookieName, out var rawId))
+        {
+            return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var record = await store.GetByIdHashAsync(SessionService.HashId(rawId), context.RequestAborted);
+        if (record is null || !SessionService.IsValid(record, DateTime.UtcNow))
+        {
+            return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        return Results.Ok(new { status = "valid" });
+    });
+
+    // Revokes the presented session immediately and clears the cookie (T9).
+    app.MapPost("/api/test/sessions/invalidate", async (HttpContext context, SessionOptions options, ISessionStore store) =>
+    {
+        if (context.Request.Cookies.TryGetValue(options.CookieName, out var rawId))
+        {
+            await store.RevokeAsync(SessionService.HashId(rawId), context.RequestAborted);
+        }
+
+        SessionCookieWriter.Clear(context, options.CookieName);
+        return Results.Ok(new { status = "invalidated" });
     });
 }
 
