@@ -39,6 +39,42 @@ public sealed class SqliteAuditStore(SqliteConnectionFactory connectionFactory, 
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<AuditPage> QueryAsync(int skip, int take, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
+
+        await using var countCommand = connection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM audit_events;";
+        var totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken));
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT timestamp_utc, actor, action, outcome, source_ip, detail
+            FROM audit_events
+            ORDER BY timestamp_utc DESC, id DESC
+            LIMIT $take OFFSET $skip;
+            """;
+        command.Parameters.AddWithValue("$take", take);
+        command.Parameters.AddWithValue("$skip", skip);
+
+        var items = new List<AuditEvent>(take);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new AuditEvent
+            {
+                TimestampUtc = DateTime.Parse(reader.GetString(0), styles: System.Globalization.DateTimeStyles.RoundtripKind),
+                Actor = reader.GetString(1),
+                Action = reader.GetString(2),
+                Outcome = reader.GetString(3),
+                SourceIp = reader.IsDBNull(4) ? null : reader.GetString(4),
+                Detail = reader.IsDBNull(5) ? null : reader.GetString(5),
+            });
+        }
+
+        return new AuditPage(items, totalCount);
+    }
+
     public async Task<int> PruneOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);

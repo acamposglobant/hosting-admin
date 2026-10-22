@@ -305,7 +305,10 @@ public sealed class SystemInfoEndpointTests
             await client.SendAsync(Get("/api/disks"));
             await client.SendAsync(Get("/api/system/info"));
 
-            Assert.Equal(0, await CountAuditRowsAsync(factory));
+            // Selective audit-on-access (task 13): first data access per session
+            // writes exactly one row (shared across data endpoints); repeated
+            // polls add nothing (T15).
+            Assert.Equal(1, await CountAuditRowsAsync(factory));
         }
         finally
         {

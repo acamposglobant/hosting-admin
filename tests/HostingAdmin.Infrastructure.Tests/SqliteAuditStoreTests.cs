@@ -192,4 +192,65 @@ public class SqliteAuditStoreTests : IDisposable
         Assert.True(reader.IsDBNull(0));
         Assert.True(reader.IsDBNull(1));
     }
+
+    // --- Paged query (plan task 13) ---
+
+    [Fact]
+    public async Task QueryAsync_ReturnsNewestFirst_WithTotalCount()
+    {
+        var baseTime = DateTime.UtcNow;
+        for (var index = 0; index < 5; index++)
+        {
+            await _store.AppendAsync(MakeEvent(action: $"event.{index}", timestamp: baseTime.AddSeconds(index)));
+        }
+
+        var page = await _store.QueryAsync(skip: 0, take: 10);
+
+        Assert.Equal(5, page.TotalCount);
+        Assert.Equal(5, page.Items.Count);
+        Assert.Equal("event.4", page.Items[0].Action); // newest first
+        Assert.Equal("event.0", page.Items[4].Action);
+    }
+
+    [Fact]
+    public async Task QueryAsync_Pagination_WalksAllRowsWithoutOverlap()
+    {
+        for (var index = 0; index < 7; index++)
+        {
+            await _store.AppendAsync(MakeEvent(action: $"event.{index}", timestamp: DateTime.UtcNow.AddSeconds(index)));
+        }
+
+        var page1 = await _store.QueryAsync(skip: 0, take: 3);
+        var page2 = await _store.QueryAsync(skip: 3, take: 3);
+        var page3 = await _store.QueryAsync(skip: 6, take: 3);
+
+        Assert.Equal(7, page1.TotalCount);
+        Assert.Equal(3, page1.Items.Count);
+        Assert.Equal(3, page2.Items.Count);
+        Assert.Single(page3.Items);
+
+        var allActions = page1.Items.Concat(page2.Items).Concat(page3.Items).Select(e => e.Action).ToList();
+        Assert.Equal(7, allActions.Distinct().Count()); // no duplicates across pages
+        Assert.Equal(7, allActions.Count());
+    }
+
+    [Fact]
+    public async Task QueryAsync_EmptyStore_ReturnsEmptyPageWithZeroTotal()
+    {
+        var page = await _store.QueryAsync(skip: 0, take: 50);
+
+        Assert.Empty(page.Items);
+        Assert.Equal(0, page.TotalCount);
+    }
+
+    [Fact]
+    public async Task QueryAsync_SkipBeyondEnd_ReturnsEmptyItemsWithCorrectTotal()
+    {
+        await _store.AppendAsync(MakeEvent());
+
+        var page = await _store.QueryAsync(skip: 10, take: 50);
+
+        Assert.Empty(page.Items);
+        Assert.Equal(1, page.TotalCount);
+    }
 }
