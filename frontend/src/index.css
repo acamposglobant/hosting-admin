@@ -44,3 +44,123 @@ button:disabled {
 [role='alert'] {
   color: #c0392b;
 }
+
+nav {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.card {
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  margin: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid #444;
+}
+
+.usage-bar {
+  position: relative;
+  background: #333;
+  border-radius: 4px;
+  height: 1.25rem;
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  background: #4a9;
+  height: 100%;
+}
+
+.usage-bar span {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+}
+
+.banner {
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+}
+
+.banner-warning {
+  background: #4a3b12;
+  color: #ffd54f;
+}
+
+.badge {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+
+.badge-active,
+.badge-success {
+  background: #1d3a24;
+  color: #7ee2a0;
+}
+
+.badge-failed,
+.badge-inactive,
+.badge-failure {
+  background: #4a1d1d;
+  color: #ff9e9e;
+}
+
+.audit-controls {
+  margin-bottom: 1rem;
+}
+
+.audit-controls input {
+  max-width: 20rem;
+}
+
+.audit-pagination {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: center;
+}
+

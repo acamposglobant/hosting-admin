@@ -30,12 +30,21 @@ describe('App auth flow', () => {
   });
 
   it('shows the authenticated view when a valid session exists', async () => {
-    vi.stubGlobal('fetch', stubApi({ '/api/metrics': { status: 200 } }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        if (path === '/api/metrics' || path === '/api/system/info' || path === '/api/disks' || path === '/api/services') {
+          return new Response('{}', { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${path}`);
+      }),
+    );
 
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByText('Signed in.')).toBeInTheDocument();
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
     });
   });
 
@@ -61,7 +70,7 @@ describe('App auth flow', () => {
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Signed in.')).toBeInTheDocument();
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
     });
   });
 
@@ -71,7 +80,7 @@ describe('App auth flow', () => {
       'fetch',
       vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
         const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
-        if (path === '/api/metrics') {
+        if (path === '/api/metrics' || path === '/api/system/info' || path === '/api/disks' || path === '/api/services') {
           return new Response('{}', { status: 200 });
         }
         if (path === '/api/auth/logout') {
