@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { fetchDisks, fetchMetrics, fetchServices, fetchSystemInfo } from '../api/types';
 import { usePolling } from '../hooks/usePolling';
 import { formatBytes, formatUptime } from '../lib/format';
+import { ServiceActions } from './ServiceActions';
 
 /** Dashboard polling interval (plan D10): 10 seconds. */
 export const DASHBOARD_POLL_INTERVAL_MS = 10_000;
@@ -193,6 +194,7 @@ export function Dashboard() {
                 <th scope="col">Sub</th>
                 <th scope="col">Enabled</th>
                 <th scope="col">Since</th>
+                {services.data.mutationCapabilityAvailable && <th scope="col">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -205,6 +207,15 @@ export function Dashboard() {
                   <td>{service.subState}</td>
                   <td>{service.enabledState}</td>
                   <td>{service.since === null ? '—' : service.since}</td>
+                  {services.data!.mutationCapabilityAvailable && (
+                    <td>
+                      <ServiceActions
+                        service={service}
+                        mutationCapabilityAvailable={services.data!.mutationCapabilityAvailable}
+                        onActionCompleted={() => void services.refresh()}
+                      />
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

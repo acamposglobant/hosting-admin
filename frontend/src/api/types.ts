@@ -74,6 +74,46 @@ export interface ServiceStatus {
 export interface ServicesSnapshot {
   services: ServiceStatus[];
   capabilityAvailable: boolean;
+  /** True when the privileged agent is reachable and mutation is possible (task 3, D24). */
+  mutationCapabilityAvailable: boolean;
+}
+
+/** Direct execution result (start, or a confirmed stop/restart). */
+export interface ServiceActionExecutionDto {
+  unit: string;
+  action: string;
+  outcome: string;
+  completedAt: string;
+}
+
+/** Pending confirmation for a destructive action (stop/restart, D20). */
+export interface ServiceActionPendingDto {
+  confirmationId: string;
+  unit: string;
+  action: string;
+  expiresAt: string;
+}
+
+export type ServiceActionRequestDto = ServiceActionExecutionDto | ServiceActionPendingDto;
+
+export function isServiceActionPending(dto: ServiceActionRequestDto): dto is ServiceActionPendingDto {
+  return 'confirmationId' in dto;
+}
+
+export function requestServiceAction(unit: string, action: 'start' | 'stop' | 'restart'): Promise<ServiceActionRequestDto> {
+  return apiFetch<ServiceActionRequestDto>(`/api/services/${encodeURIComponent(unit)}/${action}`, { method: 'POST' });
+}
+
+export function confirmServiceAction(confirmationId: string): Promise<ServiceActionExecutionDto> {
+  return apiFetch<ServiceActionExecutionDto>(`/api/service-actions/${encodeURIComponent(confirmationId)}/confirm`, {
+    method: 'POST',
+  });
+}
+
+export function cancelServiceAction(confirmationId: string): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/api/service-actions/${encodeURIComponent(confirmationId)}/cancel`, {
+    method: 'POST',
+  });
 }
 
 export interface AuditEventDto {

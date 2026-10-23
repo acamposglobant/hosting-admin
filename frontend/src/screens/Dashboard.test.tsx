@@ -71,6 +71,7 @@ const servicesPayload = {
     },
   ],
   capabilityAvailable: true,
+  mutationCapabilityAvailable: false,
 };
 
 describe('Dashboard', () => {
@@ -142,7 +143,7 @@ describe('Dashboard', () => {
         '/api/metrics': metricsPayload,
         '/api/system/info': systemInfoPayload,
         '/api/disks': disksPayload,
-        '/api/services': { services: [], capabilityAvailable: false },
+        '/api/services': { services: [], capabilityAvailable: false, mutationCapabilityAvailable: false },
       }),
     );
 
