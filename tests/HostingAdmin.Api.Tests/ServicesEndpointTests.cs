@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using HostingAdmin.Core.Agent;
 using HostingAdmin.Core.Services;
 using HostingAdmin.Infrastructure.Linux;
 using HostingAdmin.Infrastructure.Persistence;
@@ -41,8 +42,27 @@ public sealed class ServicesEndpointTests
                 ]));
     }
 
+    /// <summary>Configurable channel double for endpoint tests (task 3).</summary>
+    public sealed class FakeAgentChannel : IAgentChannel
+    {
+        public bool Available { get; set; } = true;
+
+        public bool ProbeSucceeds { get; set; } = true;
+
+        public bool IsAvailable => Available;
+
+        public Task<AgentChannelResult> SendServiceActionAsync(
+            string unit, string action, CancellationToken cancellationToken) =>
+            Task.FromResult(new AgentChannelResult(AgentOperationOutcome.Success, "ok"));
+
+        public Task<AgentChannelResult> ProbeAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new AgentChannelResult(
+                ProbeSucceeds ? AgentOperationOutcome.Success : AgentOperationOutcome.Failure, "probe"));
+    }
+
     private static (WebApplicationFactory<Program> Factory, HttpClient Client, string DatabasePath) CreateHost(
-        IServiceStatusProvider? serviceStatusProvider = null)
+        IServiceStatusProvider? serviceStatusProvider = null,
+        IAgentChannel? agentChannel = null)
     {
         var databasePath = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(),
@@ -64,6 +84,12 @@ public sealed class ServicesEndpointTests
                     services.RemoveAll<IServiceStatusProvider>();
                     services.AddSingleton(serviceStatusProvider);
                 }
+
+                // Always replace the agent channel: the real channel loads the
+                // shared secret from disk at resolution time, which does not
+                // exist in test/CI environments (task 3).
+                services.RemoveAll<IAgentChannel>();
+                services.AddSingleton(agentChannel ?? new FakeAgentChannel());
             });
         });
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -199,6 +225,83 @@ public sealed class ServicesEndpointTests
             Assert.True(root.TryGetProperty("services", out var services));
             Assert.Equal(JsonValueKind.Array, services.ValueKind);
             Assert.False(services.EnumerateArray().Any());
+        }
+        finally
+        {
+            DisposeHost(factory, client, databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task Services_WithLiveAgent_ReportsMutationCapabilityAvailable()
+    {
+        // Task 3: mutationCapabilityAvailable reflects a successful agent probe.
+        var (factory, client, databasePath) = CreateHost(
+            new FakeServiceStatusProvider(), new FakeAgentChannel { Available = true, ProbeSucceeds = true });
+        try
+        {
+            var (sessionCookie, csrfToken) = await CreateSessionAsync(client);
+            ApplyAuth(client, sessionCookie, csrfToken);
+
+            var response = await client.SendAsync(Get("/api/services"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            using var document = JsonDocument.Parse(body);
+            Assert.True(document.RootElement.TryGetProperty("mutationCapabilityAvailable", out var mutation));
+            Assert.True(mutation.GetBoolean());
+        }
+        finally
+        {
+            DisposeHost(factory, client, databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task Services_WithAgentDown_ReportsMutationCapabilityUnavailable()
+    {
+        // D24: agent down → mutationCapabilityAvailable false; status reporting
+        // itself is unaffected (still 200 with services).
+        var (factory, client, databasePath) = CreateHost(
+            new FakeServiceStatusProvider(), new FakeAgentChannel { Available = true, ProbeSucceeds = false });
+        try
+        {
+            var (sessionCookie, csrfToken) = await CreateSessionAsync(client);
+            ApplyAuth(client, sessionCookie, csrfToken);
+
+            var response = await client.SendAsync(Get("/api/services"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            using var document = JsonDocument.Parse(body);
+            Assert.True(document.RootElement.TryGetProperty("mutationCapabilityAvailable", out var mutation));
+            Assert.False(mutation.GetBoolean());
+            Assert.True(document.RootElement.TryGetProperty("services", out _));
+        }
+        finally
+        {
+            DisposeHost(factory, client, databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task Services_WithNullChannel_ReportsMutationCapabilityUnavailable()
+    {
+        // D17/D24: Windows dev (null channel) → mutationCapabilityAvailable false.
+        var (factory, client, databasePath) = CreateHost(
+            new FakeServiceStatusProvider(), new NullAgentChannel());
+        try
+        {
+            var (sessionCookie, csrfToken) = await CreateSessionAsync(client);
+            ApplyAuth(client, sessionCookie, csrfToken);
+
+            var response = await client.SendAsync(Get("/api/services"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            using var document = JsonDocument.Parse(body);
+            Assert.True(document.RootElement.TryGetProperty("mutationCapabilityAvailable", out var mutation));
+            Assert.False(mutation.GetBoolean());
         }
         finally
         {

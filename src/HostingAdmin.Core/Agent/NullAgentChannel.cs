@@ -14,4 +14,9 @@ public sealed class NullAgentChannel : IAgentChannel
     {
         return Task.FromResult(AgentChannelResult.Unavailable);
     }
+
+    public Task<AgentChannelResult> ProbeAsync(CancellationToken cancellationToken)
+    {
+        return Task.FromResult(AgentChannelResult.Unavailable);
+    }
 }

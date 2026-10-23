@@ -57,6 +57,21 @@ public class AgentProtocolTests : IDisposable
     }
 
     [Fact]
+    public async Task Ping_action_succeeds_without_touching_runner()
+    {
+        // Task 3 health probe: authenticated ping → Success, no process spawn.
+        if (!OnLinux || _listener is null || _socketPath is null)
+        {
+            return;
+        }
+
+        var response = await ExchangeAsync(
+            "{\"requestId\":\"r-ping\",\"action\":\"ping\",\"unit\":null}");
+        Assert.Equal("Success", response.Outcome);
+        Assert.Empty(_runner!.Calls);
+    }
+
+    [Fact]
     public async Task Unknown_action_is_rejected_and_runner_never_called()
     {
         // D23: only start/stop/restart exist — no enable/disable/mask.

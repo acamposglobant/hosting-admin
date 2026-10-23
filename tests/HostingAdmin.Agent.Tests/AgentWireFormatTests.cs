@@ -37,6 +37,21 @@ public class AgentWireFormatTests
     }
 
     [Fact]
+    public void Ping_request_without_unit_is_valid()
+    {
+        // Task 3: the ping health probe carries no unit; ParseRequest's rule is
+        // "unit required for mutations, not for ping". Regression guard for the
+        // CI failure where ping was rejected as malformed.
+        const string json = """{"requestId":"r-3","action":"ping","unit":null}""";
+
+        var request = JsonSerializer.Deserialize(json, AgentJsonContext.Default.AgentRequest);
+
+        Assert.NotNull(request);
+        Assert.Equal("ping", request.Action);
+        Assert.Null(request.Unit);
+    }
+
+    [Fact]
     public void AgentResponse_serializes_to_camelCase()
     {
         var response = new AgentResponse(RequestId: "r-2", Outcome: "Success", Detail: "ok");
