@@ -25,6 +25,7 @@ public class ServiceActionServiceTests
         _channel,
         _confirmations,
         _auditStore,
+        new FailureAuditGrouper(_auditStore),
         _time);
 
     // --- TA8: non-allowlisted unit never reaches the channel ---
@@ -224,6 +225,97 @@ public class ServiceActionServiceTests
         Assert.Equal(ServiceActionRequestOutcome.Executed, result.Outcome);
         Assert.Equal(AgentOperationOutcome.Rejected, result.Execution!.Outcome);
         Assert.Contains(_auditStore.Events, e => e.Outcome == AuditOutcomes.Failure);
+    }
+
+    // --- task 6: failure grouping for repeated agent failures (T16, TA11) ---
+
+    [Fact]
+    public async Task Repeated_agent_unavailable_burst_writes_exactly_one_failure_row()
+    {
+        _channel.IsAvailable = false;
+        var service = CreateService();
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            await service.RequestActionAsync(
+                "nginx.service", "start", "session-a", "203.0.113.7", CancellationToken.None);
+        }
+
+        var failureRows = _auditStore.Events
+            .Where(e => e.Action == "service.mutation" && e.Outcome == AuditOutcomes.Failure)
+            .ToList();
+        Assert.Single(failureRows);
+        Assert.Equal("admin", failureRows[0].Actor);
+        Assert.Equal("203.0.113.7", failureRows[0].SourceIp);
+        Assert.Contains("agent_unavailable", failureRows[0].Detail);
+    }
+
+    [Fact]
+    public async Task Repeated_agent_rejections_for_same_unit_action_are_grouped()
+    {
+        _channel.NextOutcome = AgentOperationOutcome.Rejected;
+        var service = CreateService();
+
+        // start executes directly, so repeated rejections hit the same key.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            await service.RequestActionAsync(
+                "nginx.service", "start", "session-a", null, CancellationToken.None);
+        }
+
+        var failureRows = _auditStore.Events
+            .Where(e => e.Action == "service.mutation" && e.Outcome == AuditOutcomes.Failure)
+            .ToList();
+        Assert.Single(failureRows);
+    }
+
+    [Fact]
+    public async Task Failure_grouping_is_per_unit_and_action()
+    {
+        _channel.IsAvailable = false;
+        var service = CreateService();
+
+        // Two distinct direct keys: nginx|start and ssh|start.
+        await service.RequestActionAsync("nginx.service", "start", "session-a", null, CancellationToken.None);
+        await service.RequestActionAsync("ssh.service", "start", "session-a", null, CancellationToken.None);
+
+        // A third distinct key via the confirm path: nginx|stop.
+        var pending = await RequestStopAsync(service, "session-a");
+        await service.ConfirmAsync(
+            pending.ConfirmationId, "session-a", null, CancellationToken.None);
+
+        var failureRows = _auditStore.Events
+            .Where(e => e.Action == "service.mutation" && e.Outcome == AuditOutcomes.Failure)
+            .ToList();
+        Assert.Equal(3, failureRows.Count);
+    }
+
+    [Fact]
+    public async Task Success_after_failures_writes_recovery_row_and_rearms_grouping()
+    {
+        _channel.IsAvailable = false;
+        var service = CreateService();
+
+        // Two failures: only the first writes a Failure row.
+        await service.RequestActionAsync("nginx.service", "start", "session-a", null, CancellationToken.None);
+        await service.RequestActionAsync("nginx.service", "start", "session-a", null, CancellationToken.None);
+        Assert.Single(_auditStore.Events.Where(e => e.Outcome == AuditOutcomes.Failure));
+
+        // Recovery: the success row is written and clears the failure state.
+        _channel.IsAvailable = true;
+        _channel.NextOutcome = AgentOperationOutcome.Success;
+        await service.RequestActionAsync("nginx.service", "start", "session-a", null, CancellationToken.None);
+
+        var successRows = _auditStore.Events
+            .Where(e => e.Action == "service.mutation" && e.Outcome == AuditOutcomes.Success)
+            .ToList();
+        Assert.Single(successRows);
+        Assert.Equal(2, _auditStore.Events.Count); // 1 failure + 1 success, no duplicates
+
+        // Re-armed: a new failure after recovery writes a fresh Failure row.
+        _channel.IsAvailable = false;
+        await service.RequestActionAsync("nginx.service", "start", "session-a", null, CancellationToken.None);
+        Assert.Equal(2, _auditStore.Events.Count(e => e.Outcome == AuditOutcomes.Failure));
     }
 
     // --- D25: token never persisted in raw form ---

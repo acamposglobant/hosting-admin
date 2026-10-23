@@ -59,6 +59,7 @@ public sealed class ServiceActionService(
     IAgentChannel agentChannel,
     IServiceActionConfirmationStore confirmationStore,
     IAuditStore auditStore,
+    FailureAuditGrouper failureGrouper,
     TimeProvider timeProvider)
 {
     /// <summary>Confirmation token lifetime (D20: default 5 minutes).</summary>
@@ -194,12 +195,19 @@ public sealed class ServiceActionService(
     private async Task<ServiceActionExecution> ExecuteAsync(
         string unit, string action, string sessionIdHash, string? sourceIp, CancellationToken cancellationToken)
     {
+        // Failure grouping (plan task 6, T16): repeated identical agent failures
+        // for the same unit+action record only the transition into failure; the
+        // next success row doubles as the recovery evidence (TA11).
+        var failureKey = $"service.mutation|{unit}|{action}";
+
         if (!agentChannel.IsAvailable)
         {
-            // D24: structured unavailability; audited as Failure (TA10).
-            await AuditAsync("service.mutation", sessionIdHash, sourceIp,
-                $"unit={unit}; action={action}; reason=agent_unavailable", cancellationToken,
-                AuditOutcomes.Failure);
+            // D24: structured unavailability; audited as Failure (TA10), grouped
+            // when repeated (task 6): a burst of retries writes one Failure row.
+            await failureGrouper.RecordFailureAsync(
+                failureKey, "service.mutation",
+                $"unit={unit}; action={action}; reason=agent_unavailable",
+                sourceIp, cancellationToken, actor: "admin");
             return new ServiceActionExecution(
                 unit, action, AgentOperationOutcome.Rejected, "Agent unavailable",
                 timeProvider.GetUtcNow().UtcDateTime);
@@ -208,9 +216,22 @@ public sealed class ServiceActionService(
         var result = await agentChannel.SendServiceActionAsync(unit, action, cancellationToken);
         var succeeded = result.Outcome == AgentOperationOutcome.Success;
 
-        await AuditAsync("service.mutation", sessionIdHash, sourceIp,
-            $"unit={unit}; action={action}; outcome={result.Outcome}", cancellationToken,
-            succeeded ? AuditOutcomes.Success : AuditOutcomes.Failure);
+        if (succeeded)
+        {
+            // Always write the success row; it also serves as the recovery
+            // record, so clear the failure state without a duplicate row.
+            failureGrouper.EndFailure(failureKey);
+            await AuditAsync("service.mutation", sessionIdHash, sourceIp,
+                $"unit={unit}; action={action}; outcome={result.Outcome}", cancellationToken,
+                AuditOutcomes.Success);
+        }
+        else
+        {
+            await failureGrouper.RecordFailureAsync(
+                failureKey, "service.mutation",
+                $"unit={unit}; action={action}; outcome={result.Outcome}",
+                sourceIp, cancellationToken, actor: "admin");
+        }
 
         return new ServiceActionExecution(
             unit, action, result.Outcome, result.Detail, timeProvider.GetUtcNow().UtcDateTime);

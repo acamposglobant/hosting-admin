@@ -59,6 +59,60 @@ describe('AuditLog', () => {
     expect(screen.getByTestId('audit-page-info')).toHaveTextContent('Showing 1–3 of 3');
   });
 
+  it('renders mutation actions with outcome and source IP (task 6)', async () => {
+    const mutationPage = {
+      items: [
+        {
+          timestampUtc: '2026-10-23T10:00:00Z',
+          actor: 'admin',
+          action: 'service.mutation',
+          outcome: 'Failure',
+          sourceIp: '192.168.1.20',
+          detail: 'unit=nginx.service; action=stop; reason=agent_unavailable',
+        },
+        {
+          timestampUtc: '2026-10-23T10:01:00Z',
+          actor: 'admin',
+          action: 'service.confirmation_issued',
+          outcome: 'Success',
+          sourceIp: '192.168.1.20',
+          detail: 'unit=nginx.service; action=stop',
+        },
+        {
+          timestampUtc: '2026-10-23T10:02:00Z',
+          actor: 'admin',
+          action: 'service.mutation',
+          outcome: 'Success',
+          sourceIp: '192.168.1.20',
+          detail: 'unit=nginx.service; action=stop; outcome=Success',
+        },
+        {
+          timestampUtc: '2026-10-23T10:03:00Z',
+          actor: 'admin',
+          action: 'auth.login',
+          outcome: 'Success',
+          sourceIp: '127.0.0.1',
+          detail: null,
+        },
+      ],
+      totalCount: 4,
+    };
+    vi.stubGlobal('fetch', stubAuditFetch(mutationPage));
+
+    render(<AuditLog />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Service mutation').length).toBe(2);
+    });
+    expect(screen.getByText('Confirmation issued')).toBeInTheDocument();
+    // Outcome badges and source IP are rendered for mutation rows.
+    const successBadges = screen.getAllByText('Success');
+    expect(successBadges.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('192.168.1.20').length).toBe(3);
+    // Unknown actions still render their raw value.
+    expect(screen.getByText('auth.login')).toBeInTheDocument();
+  });
+
   it('disables Previous on the first page and Next on the last page', async () => {
     vi.stubGlobal('fetch', stubAuditFetch());
 

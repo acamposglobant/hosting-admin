@@ -7,6 +7,23 @@ import { formatTimestamp } from '../lib/format';
 const AUDIT_PAGE_SIZE = 50;
 
 /**
+ * Human-readable labels for audit actions (plan task 6). Unknown actions
+ * fall back to their raw value, so new server-side actions stay visible.
+ */
+const ACTION_LABELS: Record<string, string> = {
+  'service.mutation': 'Service mutation',
+  'service.mutation_rejected': 'Service mutation rejected',
+  'service.confirmation_issued': 'Confirmation issued',
+  'service.confirm_rejected': 'Confirmation rejected',
+  'service.cancel': 'Confirmation cancelled',
+  'service.cancel_rejected': 'Cancel rejected',
+};
+
+function actionLabel(action: string): string {
+  return ACTION_LABELS[action] ?? action;
+}
+
+/**
  * Audit log screen (plan §5, screen 3): paged table with a client-side action
  * filter over the loaded page. Pagination is server-side (skip/take); the
  * view itself is audited server-side on every fetch (plan §3.7).
@@ -61,7 +78,7 @@ export function AuditLog() {
             <tr key={`${item.timestampUtc}-${item.action}-${item.detail ?? ''}`}>
               <td>{formatTimestamp(item.timestampUtc)}</td>
               <td>{item.actor}</td>
-              <td>{item.action}</td>
+              <td>{actionLabel(item.action)}</td>
               <td>
                 <span className={`badge badge-${item.outcome.toLowerCase()}`}>{item.outcome}</span>
               </td>

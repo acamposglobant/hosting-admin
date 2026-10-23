@@ -30,7 +30,8 @@ public sealed class FailureAuditGrouper
         string action,
         string? detail,
         string? sourceIp,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string actor = "system")
     {
         if (!_failureKeysInFailureState.TryAdd(failureKey, 0))
         {
@@ -40,9 +41,10 @@ public sealed class FailureAuditGrouper
         await _auditStore.AppendAsync(new AuditEvent
         {
             TimestampUtc = DateTime.UtcNow,
-            Actor = "system",
+            Actor = actor,
             Action = action,
             Outcome = AuditOutcomes.Failure,
+            SourceIp = sourceIp,
             Detail = detail,
         }, cancellationToken);
         return true;
@@ -57,7 +59,8 @@ public sealed class FailureAuditGrouper
         string action,
         string? detail,
         string? sourceIp,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string actor = "system")
     {
         if (!_failureKeysInFailureState.TryRemove(failureKey, out _))
         {
@@ -67,11 +70,23 @@ public sealed class FailureAuditGrouper
         await _auditStore.AppendAsync(new AuditEvent
         {
             TimestampUtc = DateTime.UtcNow,
-            Actor = "system",
+            Actor = actor,
             Action = action,
             Outcome = AuditOutcomes.Success,
+            SourceIp = sourceIp,
             Detail = detail,
         }, cancellationToken);
         return true;
+    }
+
+    /// <summary>
+    /// Clears the failure state for <paramref name="failureKey"/> without
+    /// writing a row. Used when the caller records its own success row (which
+    /// then doubles as the recovery evidence in the audit trail).
+    /// Returns true when the key was in the failure state.
+    /// </summary>
+    public bool EndFailure(string failureKey)
+    {
+        return _failureKeysInFailureState.TryRemove(failureKey, out _);
     }
 }
