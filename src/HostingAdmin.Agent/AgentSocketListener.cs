@@ -80,6 +80,16 @@ public sealed class AgentSocketListener : IAsyncDisposable
 
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         _listener.Bind(new UnixDomainSocketEndPoint(_options.SocketPath));
+        // Explicit socket file mode (review F3): do not depend on the process
+        // umask. 660 = owner + shared group only; the containing directory
+        // (0750, root-owned) remains the primary access control.
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                _options.SocketPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.GroupWrite);
+        }
         // Backlog is small: the agent serves at most MaxConcurrentConnections
         // requests at a time and rejects excess cleanly (D22).
         _listener.Listen(_options.MaxConcurrentConnections);

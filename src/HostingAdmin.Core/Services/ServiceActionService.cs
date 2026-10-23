@@ -244,7 +244,7 @@ public sealed class ServiceActionService(
         // Detail carries unit/action/reason only — never tokens or session ids (D25).
         return auditStore.AppendAsync(new AuditEvent
         {
-            TimestampUtc = DateTime.UtcNow,
+            TimestampUtc = timeProvider.GetUtcNow().UtcDateTime,
             Actor = "admin",
             Action = action,
             Outcome = outcome,
