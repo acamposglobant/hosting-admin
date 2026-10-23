@@ -11,6 +11,8 @@ using HostingAdmin.Core.Security;
 using HostingAdmin.Core.Services;
 using HostingAdmin.Core.Sessions;
 using HostingAdmin.Core.SystemInfo;
+using HostingAdmin.Core.Agent;
+using HostingAdmin.Infrastructure.Agent;
 using HostingAdmin.Infrastructure.Persistence;
 using HostingAdmin.Infrastructure.Linux;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
@@ -170,6 +172,33 @@ if (OperatingSystem.IsLinux())
 else
 {
     builder.Services.AddSingleton<IServiceStatusProvider, NullServiceStatusProvider>();
+}
+// Agent channel (increment 2, task 3, D22/D24): fail-fast options validation;
+// the shared secret is read once at startup and held in memory only (D25).
+// On non-Linux hosts the null channel reports structured "unavailable" (D17).
+builder.Services
+    .AddOptions<AgentChannelOptions>()
+    .Bind(builder.Configuration.GetSection(AgentChannelOptions.SectionName))
+    .Validate(o => Path.IsPathRooted(o.SocketPath), "AgentChannel:SocketPath must be an absolute path.")
+    .Validate(o => Path.IsPathRooted(o.SecretFile), "AgentChannel:SecretFile must be an absolute path.")
+    .Validate(o => o.CallTimeout > TimeSpan.Zero, "AgentChannel:CallTimeout must be positive.")
+    .Validate(o => o.ProbeTimeout > TimeSpan.Zero, "AgentChannel:ProbeTimeout must be positive.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<AgentChannelOptions>(sp =>
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentChannelOptions>>().Value);
+if (OperatingSystem.IsLinux())
+{
+    builder.Services.AddSingleton<IAgentChannel>(sp =>
+    {
+        var channelOptions = sp.GetRequiredService<AgentChannelOptions>();
+        var secret = AgentSharedSecret.Load(channelOptions.SecretFile);
+        return new UnixDomainSocketAgentChannel(
+            channelOptions, secret, sp.GetRequiredService<ILogger<UnixDomainSocketAgentChannel>>());
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IAgentChannel, NullAgentChannel>();
 }
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 // Selective audit-on-access (plan task 13, §3.7): first data access per session
@@ -428,7 +457,8 @@ app.MapGet("/api/services", async (
     SessionOptions sessionOptions,
     ISessionStore sessionStore,
     SelectiveAuditService selectiveAuditService,
-    IServiceStatusProvider serviceStatusProvider) =>
+    IServiceStatusProvider serviceStatusProvider,
+    IAgentChannel agentChannel) =>
 {
     if (!context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
     {
@@ -447,7 +477,19 @@ app.MapGet("/api/services", async (
         idHash, "/api/services", context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
 
     var snapshot = await serviceStatusProvider.GetStatusAsync(context.RequestAborted);
-    return Results.Json(snapshot);
+
+    // Mutation capability (task 3, D24): a short-timeout authenticated probe
+    // of the agent. Status reporting is unaffected by agent health (D24).
+    var mutationCapabilityAvailable = agentChannel.IsAvailable &&
+        (await agentChannel.ProbeAsync(context.RequestAborted)).Outcome == AgentOperationOutcome.Success;
+
+    return Results.Json(new
+    {
+        snapshot.CapabilityAvailable,
+        snapshot.UnavailableReason,
+        snapshot.Services,
+        MutationCapabilityAvailable = mutationCapabilityAvailable,
+    });
 });
 
 // Audit query endpoint (plan §4, task 13): paged, newest first; take capped at

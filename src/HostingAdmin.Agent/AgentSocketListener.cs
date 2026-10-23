@@ -182,6 +182,17 @@ public sealed class AgentSocketListener : IAsyncDisposable
             return AgentRequestOutcome.Rejected;
         }
 
+        // Health probe (task 3): authenticated liveness check, no process, no
+        // systemd interaction. Handled before allowlist/unit validation since
+        // a ping carries no unit.
+        if (request.Action == AgentActions.Ping)
+        {
+            await WriteResponseAsync(client, new AgentResponse(
+                RequestId: request.RequestId, Outcome: "Success",
+                Detail: "pong"), cancellationToken);
+            return AgentRequestOutcome.Accepted;
+        }
+
         if (!_allowlist.Contains(request.Unit!))
         {
             // Generic rejection: never reveals which units are allowlisted.

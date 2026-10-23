@@ -46,4 +46,11 @@ public interface IAgentChannel
     /// </summary>
     Task<AgentChannelResult> SendServiceActionAsync(
         string unit, string action, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Authenticated health probe (task 3): short-timeout liveness check used
+    /// to compute <c>mutationCapabilityAvailable</c>. Never spawns a process
+    /// and never exposed as an API endpoint.
+    /// </summary>
+    Task<AgentChannelResult> ProbeAsync(CancellationToken cancellationToken);
 }

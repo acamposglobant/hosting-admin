@@ -16,8 +16,18 @@ public static class AgentActions
     public const string Stop = "stop";
     public const string Restart = "restart";
 
-    public static bool IsDefined(string? action) =>
+    /// <summary>
+    /// Health probe only (task 3): authenticated liveness check that never
+    /// spawns a process and never touches systemd. Not a mutation (D23 is
+    /// unaffected) and never exposed as an API endpoint.
+    /// </summary>
+    public const string Ping = "ping";
+
+    public static bool IsMutation(string? action) =>
         action is Start or Stop or Restart;
+
+    public static bool IsDefined(string? action) =>
+        IsMutation(action) || action == Ping;
 }
 
 /// <summary>
