@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError } from '../api/client';
 
 export interface PollingState<T> {
@@ -8,6 +8,14 @@ export interface PollingState<T> {
   loading: boolean;
   /** True while a background refresh is in flight after the first load. */
   refreshing: boolean;
+}
+
+export interface PollingController<T> extends PollingState<T> {
+  /**
+   * Triggers an immediate poll (no-op if one is already in flight). Stable
+   * identity — safe to pass as a callback prop or use in effect deps.
+   */
+  refresh: () => void;
 }
 
 /**
@@ -20,7 +28,7 @@ export function usePolling<T>(
   fetcher: () => Promise<T>,
   intervalMs: number,
   refreshKey?: unknown,
-): PollingState<T> {
+): PollingController<T> {
   const [state, setState] = useState<PollingState<T>>({
     data: null,
     error: null,
@@ -31,6 +39,7 @@ export function usePolling<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
   const inFlight = useRef(false);
+  const pollRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +73,7 @@ export function usePolling<T>(
       }
     }
 
+    pollRef.current = poll;
     void poll();
     const handle = setInterval(() => void poll(), intervalMs);
     return () => {
@@ -77,5 +87,9 @@ export function usePolling<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs, refreshKey]);
 
-  return state;
+  const refresh = useCallback(() => {
+    pollRef.current();
+  }, []);
+
+  return { ...state, refresh };
 }
