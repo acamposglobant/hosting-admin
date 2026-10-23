@@ -20,6 +20,11 @@ public static class AgentActions
         action is Start or Stop or Restart;
 }
 
-/// <summary>JSON source generation for the agent request protocol.</summary>
+/// <summary>
+/// JSON source generation for the agent request protocol. Wire format is
+/// camelCase; deserialization is exact (no case-insensitive fallback) so the
+/// protocol is unambiguous.
+/// </summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AgentRequest))]
 internal sealed partial class AgentRequestJson : JsonSerializerContext;

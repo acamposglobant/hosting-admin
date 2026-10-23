@@ -300,5 +300,6 @@ public sealed class AgentSocketListener : IAsyncDisposable
 public sealed record AgentResponse(string? RequestId, string Outcome, string Detail);
 
 /// <summary>JSON source generation context for the agent protocol.</summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AgentResponse))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext;

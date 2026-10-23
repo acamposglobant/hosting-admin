@@ -183,5 +183,7 @@ public sealed class RecordingRunner : ISystemctlRunner
     }
 }
 
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AgentResponse))]
+[JsonSerializable(typeof(AgentRequest))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext;
