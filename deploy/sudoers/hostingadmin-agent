@@ -1,0 +1,22 @@
+# /etc/sudoers.d/hostingadmin-agent — managed file, exact lines only.
+#
+# Hosting Admin privileged agent (increment 2, D16 / plan §3.2).
+#
+# Policy:
+#   - One line per allowlisted unit x action. No wildcards, no variables,
+#     no command aliases: every line is a complete fixed command line.
+#   - The agent account can run exactly these commands and nothing more.
+#     A compromised agent account cannot add units, pass extra arguments,
+#     or spawn a shell (sudoers matches the full argv).
+#   - Regenerate with generate.sh when Services:UnitNames changes; validate
+#     with `visudo -cf` before installing (TA14).
+#
+# Install (operator-run, on the VPS):
+#   sudo visudo -cf deploy/sudoers/hostingadmin-agent   # syntax check
+#   sudo install -m 0440 -o root -g root \
+#     deploy/sudoers/hostingadmin-agent /etc/sudoers.d/hostingadmin-agent
+
+# --- nginx.service ---
+hostingadmin-agent ALL=(root) NOPASSWD: /usr/bin/systemctl start nginx.service
+hostingadmin-agent ALL=(root) NOPASSWD: /usr/bin/systemctl stop nginx.service
+hostingadmin-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx.service

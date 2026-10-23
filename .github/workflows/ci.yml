@@ -83,3 +83,25 @@ jobs:
 
       - name: Test (Vitest + React Testing Library)
         run: npm test
+
+  sudoers-validate:
+    # Increment 2 task 7 (TA14): the sudoers policy artifact must be
+    # syntactically valid. visudo -cf parses the file without installing it;
+    # a malformed policy fails the PR. Runs on ubuntu-latest, which ships
+    # sudo and visudo.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate sudoers artifact (visudo -cf)
+        run: |
+          visudo -cf deploy/sudoers/hostingadmin-agent
+
+      - name: Validate generator output round-trip
+        run: |
+          chmod +x deploy/sudoers/generate.sh
+          ./deploy/sudoers/generate.sh nginx.service ssh.service > /tmp/generated-sudoers
+          visudo -cf /tmp/generated-sudoers
+          # The generated policy must contain exactly 3 lines per unit.
+          test "$(grep -c 'systemctl' /tmp/generated-sudoers)" -eq 6

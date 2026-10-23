@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace HostingAdmin.Infrastructure.Agent;
 
 /// <summary>
@@ -21,19 +23,26 @@ public static class AgentSharedSecret
                 $"Agent shared secret file is empty: {secretFile}");
         }
 
-        // Strip a single trailing newline so editors/deployment scripts that
-        // append one do not break the comparison with the agent's copy.
-        if (secret[^1] == (byte)'\n')
-        {
-            secret = secret[..^1];
-        }
-
-        if (secret.Length == 0)
+        // Strip all leading/trailing whitespace (including \r\n from Windows
+        // line endings) so the bytes match the agent-side loader, which trims
+        // the same way (review F4). A mismatch here would make the agent
+        // reject every request with a non-obvious auth failure.
+        var trimmed = Encoding.UTF8.GetString(secret).Trim();
+        if (trimmed.Length == 0)
         {
             throw new InvalidOperationException(
                 $"Agent shared secret file contains only whitespace: {secretFile}");
         }
 
-        return secret;
+        // Minimum length (review F6): matches the agent-side check so a weak
+        // secret fails fast at startup on either side instead of passing a
+        // brute-forceable key into production.
+        if (trimmed.Length < 32)
+        {
+            throw new InvalidOperationException(
+                $"Agent shared secret must be at least 32 characters: {secretFile}");
+        }
+
+        return Encoding.UTF8.GetBytes(trimmed);
     }
 }
