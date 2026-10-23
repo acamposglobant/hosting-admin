@@ -9,8 +9,9 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services
     .AddOptions<AgentOptions>()
     .Bind(builder.Configuration.GetSection(AgentOptions.SectionName))
-    .Validate(o => AgentOptionsValidator.Validate(o).Count == 0,
-        "Invalid agent configuration (see AgentOptionsValidator rules).")
+    .Validate(o => AgentOptionsValidator.Validate(o).Count == 0
+                   && UnitAllowlist.Validate(o.UnitNames).Count == 0,
+        "Invalid agent configuration (see AgentOptionsValidator and UnitAllowlist rules).")
     .ValidateOnStart();
 
 builder.Logging.AddJsonConsole(options =>
@@ -46,6 +47,8 @@ if (hostErrors.Count > 0)
 
 var secret = AgentOptionsValidator.LoadSecret(agentOptions.SecretFile);
 builder.Services.AddSingleton(secret);
+builder.Services.AddSingleton(new UnitAllowlist(agentOptions.UnitNames));
+builder.Services.AddSingleton<ISystemctlRunner, SystemctlRunner>();
 builder.Services.AddSingleton<AgentSocketListener>();
 builder.Services.AddHostedService<AgentWorker>();
 
