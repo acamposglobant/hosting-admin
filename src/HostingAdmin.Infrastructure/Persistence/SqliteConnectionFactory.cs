@@ -101,6 +101,18 @@ public sealed class SqliteConnectionFactory
                     idle_expires_utc TEXT,
                     revoked          INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS service_action_confirmations (
+                    id_hash      TEXT PRIMARY KEY,     -- SHA-256 of the opaque confirmation token
+                    unit         TEXT NOT NULL,        -- allowlisted unit (exact match at creation)
+                    action       TEXT NOT NULL,        -- 'stop' | 'restart'
+                    session_hash TEXT NOT NULL,        -- creating session id hash (binding)
+                    created_utc  TEXT NOT NULL,
+                    expires_utc  TEXT NOT NULL,
+                    consumed     INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS ix_service_action_confirmations_expires
+                    ON service_action_confirmations (expires_utc);
                 """;
             command.ExecuteNonQuery();
 

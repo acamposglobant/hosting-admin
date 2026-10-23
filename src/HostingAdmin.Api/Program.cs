@@ -210,6 +210,11 @@ builder.Services.AddSingleton<ISessionStore, SqliteSessionStore>();
 builder.Services.AddSingleton<IAdminCredentialStore, SqliteAdminCredentialStore>();
 builder.Services.AddSingleton<ILoginThrottleStore, SqliteLoginThrottleStore>();
 builder.Services.AddSingleton<IBootstrapStateStore, SqliteBootstrapStateStore>();
+// Service-action confirmations (plan task 4, D20): single-use, session-bound,
+// short-TTL tokens for destructive mutations; pruned by the maintenance job.
+builder.Services.AddSingleton<IServiceActionConfirmationStore, SqliteServiceActionConfirmationStore>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<ServiceActionService>();
 builder.Services.AddSingleton<LoginService>();
 builder.Services.AddSingleton<BootstrapService>();
 builder.Services.AddHostedService<AuditRetentionPruneService>();
@@ -490,6 +495,207 @@ app.MapGet("/api/services", async (
         snapshot.Services,
         MutationCapabilityAvailable = mutationCapabilityAvailable,
     });
+});
+
+// Service mutation endpoints (plan task 4, §4): session + CSRF (CSRF enforced
+// globally by CsrfOriginMiddleware). Unit names are accepted only as exact
+// allowlist matches (D18); non-allowlisted units get 404 without revealing the
+// allowlist, and the agent channel is never called (TA8). Agent failures map
+// to capability_unavailable (503) — never agent internals (D24).
+async Task<(bool Authenticated, string IdHash)> RequireSessionAsync(
+    HttpContext context, SessionOptions sessionOptions, ISessionStore sessionStore)
+{
+    if (context.Request.Cookies.TryGetValue(sessionOptions.CookieName, out var rawId))
+    {
+        var idHash = SessionService.HashId(rawId);
+        var record = await sessionStore.GetByIdHashAsync(idHash, context.RequestAborted);
+        if (record is not null && SessionService.IsValid(record, DateTime.UtcNow))
+        {
+            return (true, idHash);
+        }
+    }
+
+    return (false, string.Empty);
+}
+
+app.MapPost("/api/services/{unit}/start", async (
+    string unit,
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ServiceActionService serviceActionService) =>
+{
+    var (authenticated, idHash) = await RequireSessionAsync(context, sessionOptions, sessionStore);
+    if (!authenticated)
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = await serviceActionService.RequestActionAsync(
+        unit, "start", idHash, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ServiceActionRequestOutcome.UnitNotAllowed =>
+            Results.Json(new { error = new { code = "not_found", message = "Unknown service." } },
+                statusCode: StatusCodes.Status404NotFound),
+        ServiceActionRequestOutcome.CapabilityUnavailable =>
+            Results.Json(new { error = new { code = "capability_unavailable", message = "Service control is unavailable." } },
+                statusCode: StatusCodes.Status503ServiceUnavailable),
+        ServiceActionRequestOutcome.Executed when result.Execution!.Outcome == AgentOperationOutcome.Success =>
+            Results.Ok(new
+            {
+                unit,
+                action = "start",
+                outcome = result.Execution.Outcome.ToString(),
+                completedAt = result.Execution.CompletedUtc,
+            }),
+        ServiceActionRequestOutcome.Executed =>
+            Results.Json(new { error = new { code = "capability_unavailable", message = "Service control is unavailable." } },
+                statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(
+            new { error = new { code = "internal_error", message = "The operation failed." } },
+            statusCode: StatusCodes.Status500InternalServerError),
+    };
+});
+
+app.MapPost("/api/services/{unit}/stop", async (
+    string unit,
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ServiceActionService serviceActionService) =>
+{
+    var (authenticated, idHash) = await RequireSessionAsync(context, sessionOptions, sessionStore);
+    if (!authenticated)
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = await serviceActionService.RequestActionAsync(
+        unit, "stop", idHash, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ServiceActionRequestOutcome.UnitNotAllowed =>
+            Results.Json(new { error = new { code = "not_found", message = "Unknown service." } },
+                statusCode: StatusCodes.Status404NotFound),
+        ServiceActionRequestOutcome.ConfirmationRequired =>
+            Results.Ok(new
+            {
+                confirmationId = result.Pending!.ConfirmationId,
+                unit = result.Pending.Unit,
+                action = result.Pending.Action,
+                expiresAt = result.Pending.ExpiresUtc,
+            }),
+        _ => Results.Json(
+            new { error = new { code = "internal_error", message = "The operation failed." } },
+            statusCode: StatusCodes.Status500InternalServerError),
+    };
+});
+
+app.MapPost("/api/services/{unit}/restart", async (
+    string unit,
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ServiceActionService serviceActionService) =>
+{
+    var (authenticated, idHash) = await RequireSessionAsync(context, sessionOptions, sessionStore);
+    if (!authenticated)
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = await serviceActionService.RequestActionAsync(
+        unit, "restart", idHash, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ServiceActionRequestOutcome.UnitNotAllowed =>
+            Results.Json(new { error = new { code = "not_found", message = "Unknown service." } },
+                statusCode: StatusCodes.Status404NotFound),
+        ServiceActionRequestOutcome.ConfirmationRequired =>
+            Results.Ok(new
+            {
+                confirmationId = result.Pending!.ConfirmationId,
+                unit = result.Pending.Unit,
+                action = result.Pending.Action,
+                expiresAt = result.Pending.ExpiresUtc,
+            }),
+        _ => Results.Json(
+            new { error = new { code = "internal_error", message = "The operation failed." } },
+            statusCode: StatusCodes.Status500InternalServerError),
+    };
+});
+
+app.MapPost("/api/service-actions/{id}/confirm", async (
+    string id,
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ServiceActionService serviceActionService) =>
+{
+    var (authenticated, idHash) = await RequireSessionAsync(context, sessionOptions, sessionStore);
+    if (!authenticated)
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = await serviceActionService.ConfirmAsync(
+        id, idHash, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ServiceActionRequestOutcome.InvalidConfirmation =>
+            Results.Json(new { error = new { code = "invalid_confirmation", message = "The confirmation is no longer valid." } },
+                statusCode: StatusCodes.Status409Conflict),
+        ServiceActionRequestOutcome.CapabilityUnavailable =>
+            Results.Json(new { error = new { code = "capability_unavailable", message = "Service control is unavailable." } },
+                statusCode: StatusCodes.Status503ServiceUnavailable),
+        ServiceActionRequestOutcome.Executed when result.Execution!.Outcome == AgentOperationOutcome.Success =>
+            Results.Ok(new
+            {
+                unit = result.Execution.Unit,
+                action = result.Execution.Action,
+                outcome = result.Execution.Outcome.ToString(),
+                completedAt = result.Execution.CompletedUtc,
+            }),
+        ServiceActionRequestOutcome.Executed =>
+            Results.Json(new { error = new { code = "capability_unavailable", message = "Service control is unavailable." } },
+                statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(
+            new { error = new { code = "internal_error", message = "The operation failed." } },
+            statusCode: StatusCodes.Status500InternalServerError),
+    };
+});
+
+app.MapPost("/api/service-actions/{id}/cancel", async (
+    string id,
+    HttpContext context,
+    SessionOptions sessionOptions,
+    ISessionStore sessionStore,
+    ServiceActionService serviceActionService) =>
+{
+    var (authenticated, idHash) = await RequireSessionAsync(context, sessionOptions, sessionStore);
+    if (!authenticated)
+    {
+        return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = await serviceActionService.CancelAsync(
+        id, idHash, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ServiceActionRequestOutcome.InvalidConfirmation =>
+            Results.Json(new { error = new { code = "invalid_confirmation", message = "The confirmation is no longer valid." } },
+                statusCode: StatusCodes.Status409Conflict),
+        ServiceActionRequestOutcome.Cancelled => Results.Ok(new { status = "cancelled" }),
+        _ => Results.Json(
+            new { error = new { code = "internal_error", message = "The operation failed." } },
+            statusCode: StatusCodes.Status500InternalServerError),
+    };
 });
 
 // Audit query endpoint (plan §4, task 13): paged, newest first; take capped at
