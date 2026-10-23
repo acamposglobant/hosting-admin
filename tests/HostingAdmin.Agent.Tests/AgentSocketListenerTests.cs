@@ -29,6 +29,8 @@ public class AgentSocketListenerTests : IDisposable
         _listener = new AgentSocketListener(
             new AgentOptions { SocketPath = _socketPath, MaxRequestBytes = 4096 },
             _secret,
+            new UnitAllowlist(["nginx.service"]),
+            new RecordingRunner(),
             NullLogger<AgentSocketListener>.Instance);
     }
 
@@ -39,7 +41,7 @@ public class AgentSocketListenerTests : IDisposable
     {
         // TA1. The agent skeleton never spawns processes at all; the assertion
         // is that an unauthenticated request gets a Rejected outcome.
-        if (!OnLinux)
+        if (!OnLinux || _listener is null || _socketPath is null)
         {
             return; // Unix sockets require Linux; covered by the Linux CI job.
         }
@@ -64,9 +66,9 @@ public class AgentSocketListenerTests : IDisposable
     }
 
     [Fact]
-    public async Task Request_with_correct_secret_is_accepted()
+    public async Task Request_with_correct_secret_and_allowlisted_unit_succeeds()
     {
-        if (!OnLinux)
+        if (!OnLinux || _listener is null || _socketPath is null)
         {
             return;
         }
@@ -79,11 +81,13 @@ public class AgentSocketListenerTests : IDisposable
             using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             client.Connect(new UnixDomainSocketEndPoint(_socketPath));
             var payload = Encoding.UTF8.GetBytes(
-                Encoding.UTF8.GetString(_secret) + "\n{}\n");
+                Encoding.UTF8.GetString(_secret!) +
+                "\n{\"requestId\":\"r-1\",\"action\":\"start\",\"unit\":\"nginx.service\"}\n");
             await client.SendAsync(payload);
 
             var response = await ReadResponseAsync(client);
-            Assert.Equal("Accepted", response.Outcome);
+            Assert.Equal("Success", response.Outcome);
+            Assert.Equal("r-1", response.RequestId);
         }
         finally
         {
@@ -94,7 +98,7 @@ public class AgentSocketListenerTests : IDisposable
     [Fact]
     public async Task Oversized_request_without_secret_is_rejected()
     {
-        if (!OnLinux)
+        if (!OnLinux || _listener is null || _socketPath is null)
         {
             return;
         }
@@ -162,5 +166,24 @@ public class AgentSocketListenerTests : IDisposable
     }
 }
 
+/// <summary>
+/// Test double for <see cref="ISystemctlRunner"/>: records the requested
+/// action/unit and returns a configurable result. Never starts a process.
+/// </summary>
+public sealed class RecordingRunner : ISystemctlRunner
+{
+    public List<(string Action, string Unit)> Calls { get; } = [];
+
+    public SystemctlResult Result { get; set; } = new(TimedOut: false, ExitCode: 0, Output: "");
+
+    public Task<SystemctlResult> RunAsync(string action, string unit, CancellationToken cancellationToken)
+    {
+        Calls.Add((action, unit));
+        return Task.FromResult(Result);
+    }
+}
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AgentResponse))]
+[JsonSerializable(typeof(AgentRequest))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext;

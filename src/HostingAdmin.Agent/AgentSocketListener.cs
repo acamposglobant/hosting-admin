@@ -32,23 +32,32 @@ public enum AgentRequestOutcome
 /// - One request per connection, bounded size, bounded concurrency, hard
 ///   per-request timeout.
 ///
-/// Task 1 scope: skeleton + authentication. Authenticated requests receive a
-/// minimal acknowledgement; the allowlist and systemctl execution arrive in
-/// task 2 — this class never spawns processes.
+/// Task 2 scope: authenticated requests are parsed as a structured JSON
+/// document, re-validated against the agent's own allowlist (D18), and
+/// dispatched to <see cref="ISystemctlRunner"/> with fixed argv (D19).
 /// </summary>
 public sealed class AgentSocketListener : IAsyncDisposable
 {
     private readonly AgentOptions _options;
     private readonly byte[] _secret;
+    private readonly UnitAllowlist _allowlist;
+    private readonly ISystemctlRunner _runner;
     private readonly ILogger<AgentSocketListener> _logger;
     private readonly SemaphoreSlim _connectionSlots;
     private readonly CancellationTokenSource _shutdown = new();
     private Socket? _listener;
 
-    public AgentSocketListener(AgentOptions options, byte[] secret, ILogger<AgentSocketListener> logger)
+    public AgentSocketListener(
+        AgentOptions options,
+        byte[] secret,
+        UnitAllowlist allowlist,
+        ISystemctlRunner runner,
+        ILogger<AgentSocketListener> logger)
     {
         _options = options;
         _secret = secret;
+        _allowlist = allowlist;
+        _runner = runner;
         _logger = logger;
         _connectionSlots = new SemaphoreSlim(options.MaxConcurrentConnections);
     }
@@ -141,7 +150,7 @@ public sealed class AgentSocketListener : IAsyncDisposable
         }
     }
 
-    /// <summary>Visible for testing: read, authenticate, respond.</summary>
+    /// <summary>Visible for testing: read, authenticate, dispatch, respond.</summary>
     internal async Task<AgentRequestOutcome> ProcessRequestAsync(Socket client, CancellationToken cancellationToken)
     {
         var (secretProvided, remainder) = await ReadUntilSecretAsync(client, cancellationToken);
@@ -153,14 +162,66 @@ public sealed class AgentSocketListener : IAsyncDisposable
             return AgentRequestOutcome.Rejected;
         }
 
-        // Task 1 skeleton: authenticated requests are acknowledged. Task 2
-        // replaces this with the structured request protocol (allowlist +
-        // systemctl runner). No process is ever started here.
+        var request = ParseRequest(remainder);
+        if (request is null)
+        {
+            await WriteResponseAsync(client, new AgentResponse(
+                RequestId: null, Outcome: "Rejected",
+                Detail: "Malformed request."), cancellationToken);
+            return AgentRequestOutcome.Rejected;
+        }
+
+        // Agent-side independent re-validation (D18): the agent never trusts
+        // API-side validation. Action must be in the fixed set (D23) and the
+        // unit must exactly match the agent's own allowlist.
+        if (!AgentActions.IsDefined(request.Action))
+        {
+            await WriteResponseAsync(client, new AgentResponse(
+                RequestId: request.RequestId, Outcome: "Rejected",
+                Detail: "Unknown action."), cancellationToken);
+            return AgentRequestOutcome.Rejected;
+        }
+
+        if (!_allowlist.Contains(request.Unit!))
+        {
+            // Generic rejection: never reveals which units are allowlisted.
+            await WriteResponseAsync(client, new AgentResponse(
+                RequestId: request.RequestId, Outcome: "Rejected",
+                Detail: "Unit is not permitted."), cancellationToken);
+            return AgentRequestOutcome.Rejected;
+        }
+
+        var result = await _runner.RunAsync(request.Action!, request.Unit!, cancellationToken);
+        var outcome = result.Succeeded ? "Success" : "Failure";
+        var detail = result.TimedOut
+            ? "Command timed out and was killed."
+            : (result.Output.Length > 0 ? result.Output : $"systemctl exited with {result.ExitCode}.");
+
         await WriteResponseAsync(client, new AgentResponse(
-            RequestId: null, Outcome: "Accepted",
-            Detail: "Authenticated. Request processing is not implemented yet (task 2)."),
+            RequestId: request.RequestId, Outcome: outcome, Detail: detail),
             cancellationToken);
-        return AgentRequestOutcome.Accepted;
+        return result.Succeeded ? AgentRequestOutcome.Accepted : AgentRequestOutcome.Rejected;
+    }
+
+    /// <summary>
+    /// Parses the JSON request document. Returns null on any parse failure —
+    /// malformed input is rejected, never partially honored (TA5).
+    /// </summary>
+    private static AgentRequest? ParseRequest(string json)
+    {
+        try
+        {
+            var request = System.Text.Json.JsonSerializer.Deserialize(json, AgentRequestJson.Default.AgentRequest);
+            return request is not null &&
+                   !string.IsNullOrWhiteSpace(request.Action) &&
+                   !string.IsNullOrWhiteSpace(request.Unit)
+                ? request
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -239,5 +300,6 @@ public sealed class AgentSocketListener : IAsyncDisposable
 public sealed record AgentResponse(string? RequestId, string Outcome, string Detail);
 
 /// <summary>JSON source generation context for the agent protocol.</summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AgentResponse))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext;
