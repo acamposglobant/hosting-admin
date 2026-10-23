@@ -277,9 +277,11 @@ public sealed class TcpEchoStubAgent : IDisposable
                     await Task.Delay(DelayResponse);
                 }
 
-                var outcome = requestLine.Contains("\"start\"") && requestLine.Contains("nginx.service")
+                var outcome = requestLine.Contains("\"ping\"")
                     ? "Success"
-                    : requestLine.Contains("\"start\"") ? "Rejected" : "Failure";
+                    : requestLine.Contains("\"start\"") && requestLine.Contains("nginx.service")
+                        ? "Success"
+                        : requestLine.Contains("\"start\"") ? "Rejected" : "Failure";
                 var response = $"{{\"requestId\":null,\"outcome\":\"{outcome}\",\"detail\":\"stub\"}}\n";
                 await client.SendAsync(Encoding.UTF8.GetBytes(response), CancellationToken.None);
             }

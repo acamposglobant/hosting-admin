@@ -225,7 +225,9 @@ public sealed class AgentSocketListener : IAsyncDisposable
             var request = System.Text.Json.JsonSerializer.Deserialize(json, AgentRequestJson.Default.AgentRequest);
             return request is not null &&
                    !string.IsNullOrWhiteSpace(request.Action) &&
-                   !string.IsNullOrWhiteSpace(request.Unit)
+                   // Mutations require a unit; the ping health probe does not.
+                   (request.Action == AgentActions.Ping ||
+                    !string.IsNullOrWhiteSpace(request.Unit))
                 ? request
                 : null;
         }
