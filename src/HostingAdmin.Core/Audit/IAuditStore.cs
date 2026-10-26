@@ -23,4 +23,11 @@ public interface IAuditStore
     /// number of rows removed. The only deletion path for audit data.
     /// </summary>
     Task<int> PruneOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns up to <paramref name="take"/> events with id greater than
+    /// <paramref name="afterId"/>, in ascending id order (increment 3, D26).
+    /// Read-only; used by the audit shipping worker to resume from its cursor.
+    /// </summary>
+    Task<IReadOnlyList<AuditEventRow>> QueryAfterIdAsync(long afterId, int take, CancellationToken cancellationToken = default);
 }

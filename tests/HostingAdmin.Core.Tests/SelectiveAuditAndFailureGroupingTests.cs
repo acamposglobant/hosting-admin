@@ -26,6 +26,9 @@ public class SelectiveAuditAndFailureGroupingTests
 
         public Task<int> PruneOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
+
+        public Task<IReadOnlyList<AuditEventRow>> QueryAfterIdAsync(long afterId, int take, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<AuditEventRow>>([]);
     }
 
     // --- Selective audit-on-access (first access per session, T15) ---

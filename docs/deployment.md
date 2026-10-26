@@ -1,12 +1,16 @@
-# Hosting Admin — Deployment Guide (Increment 1)
+# Hosting Admin — Deployment Guide (Increment 3)
 
-Target: a single Ubuntu 24.04 VPS, read-only observability increment.
-The panel is private: it must never be reachable without the identity-aware
-proxy (IAP) in front of it.
+Target: a single Ubuntu 24.04 VPS. The panel provides read-only observability
+plus allowlisted service start/stop/restart through a separate privileged
+agent. The panel is private: it must never be reachable without the
+identity-aware proxy (IAP) in front of it.
 
-> **Status:** this increment performs zero mutations. The deployment below has
-> been validated by the automated suite (including Linux CI integration tests);
-> the real IAP integration is validated only at first deployment — see
+> **Status:** Increment 3 (deployment hardening). The API performs zero
+> mutations itself; the only mutations are allowlisted `systemctl
+> start|stop|restart` calls executed by a separate unprivileged agent over a
+> local unix socket. The deployment below has been validated by the automated
+> suite (including Linux CI integration tests); the real IAP integration is
+> validated only at first deployment — see
 > [Residual risks](security/security-review-increment-1.md#logged-residual-risks).
 
 ## 1. Architecture of a deployment
@@ -19,9 +23,13 @@ Internet ──TLS──▶ IAP (MFA at the edge)
                      │  HTTP over loopback only
                      ▼
         hostingadmin-api.service (systemd, unprivileged)
-                     │  127.0.0.1:5080
-                     ▼
-              SQLite (data/hostingadmin.db)
+          │  127.0.0.1:5080          │  unix socket
+          ▼                          ▼  /run/hostingadmin/agent.sock (0660)
+              SQLite          hostingadmin-agent.service (systemd,
+              (data/hostingadmin.db)  unprivileged, own account)
+                                       │  sudo (enumerated lines only)
+                                       ▼
+                            systemctl start|stop|restart <unit>
 ```
 
 Controls in order of importance:
@@ -46,6 +54,11 @@ Controls in order of importance:
 - TLS certificate for the panel hostname (e.g. via Let's Encrypt on the IAP
   or on Nginx, depending on where TLS terminates).
 - A dedicated unprivileged user; the API never runs as root.
+- A second dedicated unprivileged user for the agent (`hostingadmin-agent`);
+  the agent never runs as root either (it escalates only via enumerated
+  sudoers lines).
+- `sudo` (for the agent's allowlisted systemctl escalation) and `openssl`
+  (for secret generation).
 
 ## 3. Build and publish
 
@@ -59,11 +72,14 @@ npm run build          # outputs frontend/dist
 
 # Backend
 dotnet publish src/HostingAdmin.Api -c Release -o publish/api
+dotnet publish src/HostingAdmin.Agent -c Release -o publish/agent
 ```
 
 Copy to the VPS:
 
 - `publish/api/*` → `/opt/hostingadmin/api/`
+- `publish/agent/*` → `/opt/hostingadmin/agent/` (root-owned, read-only to
+  the agent account — see §4a)
 - `frontend/dist/*` → `/opt/hostingadmin/www/` (SPA static files)
 
 ## 4. Service account
@@ -77,6 +93,135 @@ sudo chmod 750 /opt/hostingadmin /opt/hostingadmin/data
 
 The `data/` directory is the only location the service may write
 (SQLite database, audit records). Everything else is read-only to it.
+
+## 4a. Agent service account
+
+The agent runs under its **own** unprivileged account — never root, never the
+API's `hostingadmin` account (D16):
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hostingadmin-agent
+sudo mkdir -p /opt/hostingadmin/agent
+sudo chown root:root /opt/hostingadmin/agent
+sudo chmod 755 /opt/hostingadmin/agent
+```
+
+The agent account owns nothing except its runtime socket (in the
+tmpfiles-managed directory below); binaries and config are root-owned and
+read-only to it.
+
+## 4b. Shared secret provisioning (API ↔ agent)
+
+Every agent request must carry a shared secret (D17). One secret, two
+mode-600 files — one readable by the API account, one by the agent account.
+**Canonical path: `/etc/hostingadmin/agent-secret`** (the agent's default).
+The API's default differs (`agent-shared-secret`), so the API config below
+overrides `AgentChannel:SecretFile` to the canonical path.
+
+```bash
+sudo mkdir -p /etc/hostingadmin
+
+# Generate once (48 random bytes, base64):
+openssl rand -base64 48 | sudo tee /etc/hostingadmin/agent-secret >/dev/null
+
+# API copy: owned by root, group = API service account, mode 600
+sudo chown root:hostingadmin /etc/hostingadmin/agent-secret
+sudo chmod 600 /etc/hostingadmin/agent-secret
+
+# Agent copy: same content, group = agent service account
+sudo cp /etc/hostingadmin/agent-secret /etc/hostingadmin/agent-secret.agent
+sudo chown root:hostingadmin-agent /etc/hostingadmin/agent-secret.agent
+sudo chmod 600 /etc/hostingadmin/agent-secret.agent
+```
+
+Rules:
+
+- The secret is **never** committed to the repo, never written to logs, never
+  passed on a command line. The redaction denylist scrubs it from logs, but
+  do not rely on that for new material.
+- Both files must exist before either unit starts; both services fail fast
+  (validated at startup) if the file is missing or group-readable by others.
+
+**Rotation** (e.g. after a suspected leak, or periodically):
+
+```bash
+openssl rand -base64 48 | sudo tee /etc/hostingadmin/agent-secret >/dev/null
+sudo cp /etc/hostingadmin/agent-secret /etc/hostingadmin/agent-secret.agent
+sudo chown root:hostingadmin-agent /etc/hostingadmin/agent-secret.agent
+sudo chmod 600 /etc/hostingadmin/agent-secret.agent
+sudo systemctl restart hostingadmin-agent hostingadmin-api
+
+# Verify the pair works:
+curl -sS http://127.0.0.1:5080/api/health          # API up
+sudo -u hostingadmin-agent systemctl is-active hostingadmin-agent  # agent up
+# then perform one allowlisted action through the UI — it must succeed.
+```
+
+## 4c. Socket directory
+
+The agent binds `/run/hostingadmin/agent.sock` (mode 660). `/run` is tmpfs,
+so the directory is recreated at boot by a tmpfiles.d entry **before** both
+units start (root-owned, 0750, group = agent group — the primary access
+control; the socket mode is defense in depth):
+
+`/etc/tmpfiles.d/hostingadmin-agent.conf`:
+
+```conf
+# Type Path               Mode User Group                Age Argument
+d      /run/hostingadmin   0750 root hostingadmin-agent   -
+```
+
+```bash
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/hostingadmin-agent.conf
+```
+
+The API connects to the socket through the shared group; no other account can
+even traverse the directory.
+
+## 4d. Sudoers installation
+
+The escalation policy ships as a managed artifact:
+[`deploy/sudoers/hostingadmin-agent`](sudoers/hostingadmin-agent), generated by
+`deploy/sudoers/generate.sh` from the unit list. Every line is a complete
+fixed command line — no wildcards, no variables; a compromised agent account
+can run exactly those commands and nothing more (D16).
+
+```bash
+# Regenerate when Services:UnitNames changes (must match appsettings.json):
+./deploy/sudoers/generate.sh nginx.service ssh.service > /tmp/hostingadmin-agent
+
+# Validate BEFORE install (CI also does this on every PR):
+visudo -cf /tmp/hostingadmin-agent
+
+# Install:
+sudo install -m 0440 -o root -g root \
+  /tmp/hostingadmin-agent /etc/sudoers.d/hostingadmin-agent
+```
+
+If `Services:UnitNames` ever changes: update the API config, regenerate the
+sudoers artifact from the same list, re-validate, reinstall, then restart the
+agent. The two lists must always match.
+
+## 4e. Agent systemd unit
+
+`/etc/systemd/system/hostingadmin-agent.service` — full unit and rationale in
+[`docs/deployment/agent-systemd-unit.md`](deployment/agent-systemd-unit.md).
+Key points:
+
+- `User=hostingadmin-agent` (own unprivileged account, D16).
+- **`NoNewPrivileges` is intentionally omitted**: under `NO_NEW_PRIVS` the
+  kernel ignores setuid bits on exec, so sudo escalation would silently fail.
+  The escalation surface is bounded instead by the enumerated sudoers lines
+  (§4d) plus the rest of the hardening profile. Full analysis:
+  [agent unit doc §2](deployment/agent-systemd-unit.md#2-nonewprivileges-vs-sudo--verification-result).
+- Same hardening profile as the API unit otherwise (`ProtectSystem=strict`,
+  `PrivateTmp`, `CapabilityBoundingSet=`, `RestrictAddressFamilies=AF_UNIX`, …).
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hostingadmin-agent
+sudo systemctl status hostingadmin-agent
+```
 
 ## 5. Production configuration
 
@@ -106,6 +251,12 @@ by `hostingadmin`):
     "UnitNames": [ "nginx.service", "ssh.service" ],
     "SystemctlPath": "/usr/bin/systemctl",
     "Timeout": "00:00:02"
+  },
+  "AgentChannel": {
+    "SocketPath": "/run/hostingadmin/agent.sock",
+    "SecretFile": "/etc/hostingadmin/agent-secret",
+    "CallTimeout": "00:00:05",
+    "ProbeTimeout": "00:00:00.750"
   }
 }
 ```
@@ -119,7 +270,18 @@ Notes:
 - `AllowedOrigins` must list the exact origin browsers use; Origin validation
   rejects everything else.
 - `Services:UnitNames` is the systemd allowlist — units not listed are never
-  queried. Keep it minimal.
+  queried. Keep it minimal. It must exactly match the agent's
+  `Agent:UnitNames` and the installed sudoers artifact (§4d).
+- `AgentChannel:SecretFile` points at the canonical shared secret file
+  (§4b); the API reads it at startup and fails fast if it is missing.
+- `AuditShipping:Enabled` (default **false**) gates the audit shipping worker
+  (D26). When true, a `BackgroundService` polls `audit_events` and writes one
+  JSON-escaped syslog line per event to `/dev/log` (tag
+  `hostingadmin-audit`); the cursor lives in `admin_state`
+  (`audit.shipping.last_id`), so restarts neither duplicate nor skip. Remote
+  forwarding is the operator's rsyslog config — this process only writes the
+  local socket. Shipping is best-effort: a sink failure is retried next poll
+  and audit rows are never mutated.
 
 ## 6. systemd unit
 
@@ -284,7 +446,58 @@ sudo systemctl start hostingadmin-api
 - Never edit `appsettings.Production.json` while the service runs; stop,
   edit, start.
 
-## 10. Post-deployment checklist
+## 10. Backup and restore (increment 3)
+
+Backups are an **operator-run** concern (D27): no in-app backup API, no new
+endpoints, no new privileged paths. Two scripts ship in `deploy/`:
+
+### backup.sh
+
+```bash
+# As the API service account (least privilege, preferred):
+sudo -u hostingadmin deploy/backup.sh --prune 14 \
+    /opt/hostingadmin/data/hostingadmin.db /var/backups/hostingadmin
+```
+
+- Uses `sqlite3 .backup` — a consistent copy even while the API runs (WAL).
+- Writes `<name>.db` plus a `<name>.db.sha256` manifest, both mode 600.
+- `--prune N` keeps only the newest N backups (and their manifests).
+- Schedule with cron (example in the script header). The backup directory
+  must be outside the repo and readable only by the operator/service account:
+  **backups contain the full audit history and session hashes** — losing one
+  is a disclosure of audit metadata (no secrets: password hashes are salted
+  and slow, session ids are hashed at rest).
+
+### restore.sh
+
+```bash
+sudo deploy/restore.sh /var/backups/hostingadmin/hostingadmin-YYYYMMDDTHHMMSSZ.db
+```
+
+Procedure: verify the sha256 manifest → stop `hostingadmin-api` → replace the
+database (removing stale `-wal`/`-shm` sidecars) → **prune the `sessions`
+table** → start the API → poll `/api/health` for up to 30 s.
+
+Security semantics (TA18, enforced by the CI round-trip test):
+
+- **Restored sessions are invalid.** An old database resurrects old session
+  rows; the restore prunes `sessions` before the API starts, forcing every
+  admin to log in again. Never skip this step when restoring manually.
+- Confirmation tokens are short-TTL and self-expiring; no special handling.
+- The script refuses a backup whose checksum does not match its manifest.
+- The schema initializer is idempotent: restoring an older backup is safe;
+  the API migrates the schema on startup.
+
+### Round-trip test (CI)
+
+`deploy/test-backup-restore.sh` runs in CI (job `backup-restore-test`): it
+creates a scratch database, backs it up, damages the live file, restores, and
+asserts audit history survives while sessions are pruned. It also asserts the
+manifest check rejects a tampered backup and that `--prune` keeps exactly N.
+
+## 11. Post-deployment checklist
+
+API:
 
 - [ ] `ss -tlnp` shows the API on `127.0.0.1` only.
 - [ ] `curl https://panel.example.invalid/api/health` returns 200 through the IAP.
@@ -297,3 +510,35 @@ sudo systemctl start hostingadmin-api
 - [ ] `sudo systemctl status hostingadmin-api` shows no hardening violations
       (`systemd-analyze security hostingadmin-api` — review the exposure level).
 - [ ] Secrets (attestation secret, credential hashes) appear nowhere in logs.
+
+Agent (increment 2):
+
+- [ ] `hostingadmin-agent.service` is active; `systemd-analyze security
+      hostingadmin-agent` exposure level reviewed and recorded (see
+      [systemd security review](deployment/systemd-security-review.md)).
+- [ ] `/run/hostingadmin/agent.sock` exists, mode 0660, directory root-owned 0750.
+- [ ] Secret files `/etc/hostingadmin/agent-secret{,.agent}` are mode 600,
+      root-owned, group per service account.
+- [ ] Sudoers round-trip: `visudo -cf /etc/sudoers.d/hostingadmin-agent` passes;
+      `sudo -u hostingadmin-agent sudo -l` lists ONLY the enumerated lines.
+- [ ] A real start/stop/restart of one allowlisted unit through the UI works;
+      cancel path leaves the service state unchanged.
+- [ ] Audit rows appear for every mutation step (request/confirm/outcome) with
+      outcome and source IP.
+- [ ] Non-allowlisted unit → 4xx, audited as rejected; no agent call.
+
+Audit shipping (increment 3, optional — off by default):
+
+- [ ] If `AuditShipping:Enabled=true`: lines appear in `/var/log/syslog` (or
+      journalctl) tagged `hostingadmin-audit`, one per audit row, in id order;
+      restarting the API does not duplicate or skip rows.
+- [ ] If rsyslog forwarding is configured: shipped rows arrive at the remote
+      log host; the API account has no network log credentials (D26).
+
+Backup/restore (increment 3):
+
+- [ ] A first backup exists (`deploy/backup.sh`), mode 600, stored outside the
+      repo, with its `.sha256` manifest; cron schedule configured if desired.
+- [ ] A restore drill was performed on a scratch copy: `deploy/restore.sh`
+      round-trips, sessions are pruned (re-login forced), audit history
+      intact (see [Backup and restore](#10-backup-and-restore-increment-3)).
