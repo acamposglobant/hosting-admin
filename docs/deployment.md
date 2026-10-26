@@ -59,6 +59,8 @@ Controls in order of importance:
   sudoers lines).
 - `sudo` (for the agent's allowlisted systemctl escalation) and `openssl`
   (for secret generation).
+- `sqlite3` CLI (for the operator-run backup/restore scripts —
+  [section 10](#10-backup-and-restore-increment-3)).
 
 ## 3. Build and publish
 
