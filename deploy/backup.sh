@@ -57,7 +57,7 @@ fi
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP="$(date -u +%Y%m%dT%H%M%S.%3NZ)"
 TARGET="$BACKUP_DIR/hostingadmin-$STAMP.db"
 TMP_TARGET="$TARGET.tmp"
 
