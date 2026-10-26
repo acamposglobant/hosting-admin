@@ -15,6 +15,7 @@ using HostingAdmin.Core.Agent;
 using HostingAdmin.Infrastructure.Agent;
 using HostingAdmin.Infrastructure.Persistence;
 using HostingAdmin.Infrastructure.Linux;
+using HostingAdmin.Worker;
 using SessionOptions = HostingAdmin.Core.Sessions.SessionOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -218,6 +219,27 @@ builder.Services.AddSingleton<ServiceActionService>();
 builder.Services.AddSingleton<LoginService>();
 builder.Services.AddSingleton<BootstrapService>();
 builder.Services.AddHostedService<AuditRetentionPruneService>();
+
+// Audit shipping (increment 3, D26): config-gated OFF by default (TA19).
+// When enabled, a BackgroundService polls audit_events and writes one syslog
+// line per event to /dev/log; remote forwarding is the operator's rsyslog
+// config. No new endpoints, no new listeners, no new privileges.
+if (builder.Configuration.GetSection(AuditShippingOptions.SectionName).Get<AuditShippingOptions>() is { Enabled: true } shippingOptions)
+{
+    builder.Services
+        .AddOptions<AuditShippingOptions>()
+        .Bind(builder.Configuration.GetSection(AuditShippingOptions.SectionName))
+        .Validate(o => o.PollIntervalSeconds >= 1, "AuditShipping:PollIntervalSeconds must be at least 1.")
+        .Validate(o => o.BatchSize >= 1, "AuditShipping:BatchSize must be at least 1.")
+        .ValidateOnStart();
+    builder.Services.AddSingleton(sp =>
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuditShippingOptions>>().Value);
+    builder.Services.AddSingleton<IAuditShippingCursorStore, SqliteAuditShippingCursorStore>();
+    builder.Services.AddSingleton<ISyslogWriter>(OperatingSystem.IsLinux()
+        ? new DevLogSyslogWriter()
+        : new NullSyslogWriter());
+    builder.Services.AddHostedService<AuditShippingWorker>();
+}
 
 var app = builder.Build();
 

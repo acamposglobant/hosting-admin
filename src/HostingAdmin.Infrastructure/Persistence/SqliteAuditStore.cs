@@ -92,4 +92,41 @@ public sealed class SqliteAuditStore(SqliteConnectionFactory connectionFactory, 
 
         return deleted;
     }
+
+    public async Task<IReadOnlyList<AuditEventRow>> QueryAfterIdAsync(long afterId, int take, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, timestamp_utc, actor, action, outcome, source_ip, detail
+            FROM audit_events
+            WHERE id > $afterId
+            ORDER BY id ASC
+            LIMIT $take;
+            """;
+        command.Parameters.AddWithValue("$afterId", afterId);
+        command.Parameters.AddWithValue("$take", take);
+
+        var items = new List<AuditEventRow>(take);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new AuditEventRow
+            {
+                Id = reader.GetInt64(0),
+                Event = new AuditEvent
+                {
+                    TimestampUtc = DateTime.Parse(reader.GetString(1), styles: System.Globalization.DateTimeStyles.RoundtripKind),
+                    Actor = reader.GetString(2),
+                    Action = reader.GetString(3),
+                    Outcome = reader.GetString(4),
+                    SourceIp = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    Detail = reader.IsDBNull(6) ? null : reader.GetString(6),
+                },
+            });
+        }
+
+        return items;
+    }
 }

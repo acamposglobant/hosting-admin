@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\HostingAdmin.Core\HostingAdmin.Core.csproj" />
     <ProjectReference Include="..\HostingAdmin.Infrastructure\HostingAdmin.Infrastructure.csproj" />
+    <ProjectReference Include="..\HostingAdmin.Worker\HostingAdmin.Worker.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

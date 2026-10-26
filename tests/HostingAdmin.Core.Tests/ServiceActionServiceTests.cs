@@ -430,5 +430,8 @@ public class ServiceActionServiceTests
 
         public Task<int> PruneOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+
+        public Task<IReadOnlyList<AuditEventRow>> QueryAfterIdAsync(long afterId, int take, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 }
