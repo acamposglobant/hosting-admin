@@ -125,3 +125,41 @@ jobs:
       - name: Shellcheck deploy scripts
         run: |
           shellcheck deploy/backup.sh deploy/restore.sh deploy/test-backup-restore.sh
+
+  deps-audit:
+    # Increment 3 task 5 (D29): dependency vulnerability scanning, ADVISORY
+    # (non-blocking) first. Findings are printed for triage but do not fail
+    # the build until the baseline noise is known; flipping to blocking is a
+    # one-line change (remove the `|| true` guards) once triaged.
+    # - dotnet: vulnerable direct + transitive NuGet packages
+    # - npm: production dependencies only (--omit=dev)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Restore (for dotnet list package)
+        run: dotnet restore
+
+      - name: .NET vulnerable packages (advisory)
+        run: |
+          echo "::warning::Advisory scan (D29) — findings do not fail the build"
+          dotnet list package --vulnerable --include-transitive || true
+
+      - name: npm production audit (advisory)
+        working-directory: frontend
+        run: |
+          echo "::warning::Advisory scan (D29) — findings do not fail the build"
+          npm audit --omit=dev || true

@@ -103,7 +103,34 @@ The increment 1 security review pass logged the following residual risks
 - IAP integration validated only at first deployment (checklist in the
   deployment guide).
 - Single admin with one in-application factor; MFA delegated to the IAP.
-- Audit records live on the same host filesystem (SQLite); off-host audit
-  shipping is a future control.
-- No automated dependency vulnerability scanning yet.
+- ~~Audit records live on the same host filesystem (SQLite); off-host audit
+  shipping is a future control.~~ **Retired in increment 3 (D26):** the
+  audit shipping worker can duplicate every audit row to local syslog;
+  off-host copying is the operator's rsyslog forwarding config. Shipping is
+  best-effort (no delivery acknowledgment); a root attacker can still stop
+  both copies.
+- ~~No automated dependency vulnerability scanning yet.~~ **Addressed in
+  increment 3 (D29):** CI job `deps-audit` runs
+  `dotnet list package --vulnerable --include-transitive` and
+  `npm audit --omit=dev`. **Advisory (non-blocking) by design:** a vulnerable
+  dependency ships until triaged — the baseline was clean at introduction
+  (2026-10-26); flipping the job to blocking is a one-line change once the
+  noise level is known.
 - No protection is claimed against a root-compromised host.
+
+### Residual risks (increment 3)
+
+- Audit shipping (when enabled) is best-effort: no delivery acknowledgment,
+  no replay from the remote side; gaps are possible during a log-host
+  outage. A determined root attacker can stop both copies (unchanged).
+- Backup files contain the full audit history and session hashes; their
+  storage location, permissions (mode 600) and retention are operator
+  responsibilities. Loss of a backup is a disclosure of audit metadata
+  (no secrets: password hashes are salted+slow, session ids are hashed).
+- `systemd-analyze security` results are recorded at deployment time only;
+  drift between deployments is not continuously monitored (D28).
+- Dependency scanning is advisory (D29); findings are triage input, not a
+  gate. Flipping to blocking is a one-line CI change once the baseline is
+  known.
+- The restore procedure's systemd/health-check path is validated only on a
+  real host; CI exercises the logic with `--no-systemd` (TA18).
