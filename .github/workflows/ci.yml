@@ -105,3 +105,23 @@ jobs:
           visudo -cf /tmp/generated-sudoers
           # The generated policy must contain exactly 3 lines per unit.
           test "$(grep -c 'systemctl' /tmp/generated-sudoers)" -eq 6
+
+  backup-restore-test:
+    # Increment 3 task 4 (TA18): the operator-run backup/restore scripts must
+    # round-trip a scratch database. Restore must prune sessions (no
+    # resurrected sessions) while audit history survives, must verify the
+    # sha256 manifest, and must reject a tampered backup. Runs on
+    # ubuntu-latest, which ships sqlite3 and bash.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run backup/restore round-trip test
+        run: |
+          chmod +x deploy/backup.sh deploy/restore.sh deploy/test-backup-restore.sh
+          ./deploy/test-backup-restore.sh
+
+      - name: Shellcheck deploy scripts
+        run: |
+          shellcheck deploy/backup.sh deploy/restore.sh deploy/test-backup-restore.sh
