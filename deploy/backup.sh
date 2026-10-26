@@ -85,8 +85,12 @@ if [ -n "$KEEP" ]; then
         echo "backup.sh: --prune requires a positive integer" >&2
         exit 1
     fi
-    # shellcheck disable=SC2012  # filenames sort chronologically by design
-    ls -1 "$BACKUP_DIR"/hostingadmin-*.db 2>/dev/null | head -n -"$KEEP" | while read -r old; do
+    # Filenames are machine-generated (UTC timestamp, no whitespace), so
+    # glob expansion is safe here; nullglob-style iteration via for-loop.
+    for old in "$BACKUP_DIR"/hostingadmin-*.db; do
+        [ -e "$old" ] || break
+        echo "$old"
+    done | head -n -"$KEEP" | while read -r old; do
         rm -f "$old" "$old.sha256"
         echo "backup.sh: pruned $(basename "$old")"
     done

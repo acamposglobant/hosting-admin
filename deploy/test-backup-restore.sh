@@ -50,7 +50,7 @@ pass "scratch database created with one audit row and one live session"
 # --- Act 1: backup -----------------------------------------------------------
 "$SCRIPT_DIR/backup.sh" --prune 5 "$DB" "$BACKUP_DIR" >/dev/null
 
-BACKUP_FILE="$(ls -1 "$BACKUP_DIR"/hostingadmin-*.db | head -n 1)"
+BACKUP_FILE="$(printf '%s\n' "$BACKUP_DIR"/hostingadmin-*.db | head -n 1)"
 [ -f "$BACKUP_FILE" ] || fail "backup file was not created"
 [ -f "$BACKUP_FILE.sha256" ] || fail "sha256 manifest was not created"
 
@@ -100,9 +100,9 @@ for i in 1 2 3 4 5 6 7; do
     sqlite3 "$DB" "UPDATE audit_events SET detail = 'gen-$i' WHERE id = 1;"
     "$SCRIPT_DIR/backup.sh" --prune 3 "$DB" "$BACKUP_DIR" >/dev/null
 done
-COUNT="$(ls -1 "$BACKUP_DIR"/hostingadmin-*.db | wc -l)"
+COUNT="$(printf '%s\n' "$BACKUP_DIR"/hostingadmin-*.db | wc -l)"
 [ "$COUNT" -eq 3 ] || fail "prune kept $COUNT backups, expected 3"
-ORPHANS="$(ls -1 "$BACKUP_DIR"/*.sha256 2>/dev/null | wc -l)"
+ORPHANS="$(printf '%s\n' "$BACKUP_DIR"/*.sha256 | wc -l)"
 [ "$ORPHANS" -eq 3 ] || fail "prune left orphaned manifests ($ORPHANS, expected 3)"
 pass "prune keeps the newest 3 backups and their manifests"
 
